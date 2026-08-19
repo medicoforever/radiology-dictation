@@ -8,9 +8,8 @@ import {
   RADIOLOGY_TEMPLATES_CATALOG,
   RadiologyDocxTemplate,
 } from '../../services/templateCatalog';
-import { saveUserTemplate, getUserTemplates, deleteUserTemplate, UserTemplate } from '../../services/templateStorage';
+import { saveUserTemplate, UserTemplate } from '../../services/templateStorage';
 import { extractLinesFromDocxBlob, mergeFindingsIntoDocx } from '../../services/docxService';
-import { extractTemplateFromImage } from '../../services/geminiService';
 
 export interface SelectedTemplateData {
   id: string;
@@ -44,7 +43,6 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
   const [activeTab, setActiveTab] = useState<string>('ALL');
   const [previewTemplate, setPreviewTemplate] = useState<SelectedTemplateData | null>(null);
 
-  // Upload custom template state
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
@@ -69,7 +67,6 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
     }
   }, [isOpen, selectedTemplateId]);
 
-  // Combine built-in templates and user custom templates
   const allTemplatesList: SelectedTemplateData[] = useMemo(() => {
     const list: SelectedTemplateData[] = RADIOLOGY_TEMPLATES_CATALOG.map(t => ({
       id: t.id,
@@ -102,17 +99,18 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
   const filteredTemplates = useMemo(() => {
     let list = allTemplatesList;
 
-    // Filter by active Tab
-    if (activeTab === 'Gopinath Formats') {
-      list = list.filter(t => t.id.startsWith('gopinath_'));
-    } else if (activeTab === 'Centricity CT') {
-      list = list.filter(t => t.id.startsWith('centricity_') && t.modality === 'CT');
-    } else if (activeTab === 'Centricity MRI') {
-      list = list.filter(t => t.id.startsWith('centricity_') && t.modality === 'MRI');
-    } else if (activeTab === 'Centricity USG') {
-      list = list.filter(t => t.id.startsWith('centricity_') && t.modality === 'USG');
-    } else if (activeTab === 'Centricity X-Ray') {
-      list = list.filter(t => t.id.startsWith('centricity_') && (t.modality === 'X-Ray' || t.modality === 'Fluoroscopy'));
+    if (activeTab === 'Comprehensive MRI') {
+      list = list.filter(t => t.id.startsWith('mri_proto_') || t.id.startsWith('user_'));
+    } else if (activeTab === 'Vascular Doppler') {
+      list = list.filter(t => t.id.startsWith('usg_dop_'));
+    } else if (activeTab === 'Standard CT') {
+      list = list.filter(t => t.id.startsWith('ris_') && t.modality === 'CT');
+    } else if (activeTab === 'Standard MRI') {
+      list = list.filter(t => t.id.startsWith('ris_') && t.modality === 'MRI');
+    } else if (activeTab === 'Standard USG') {
+      list = list.filter(t => t.id.startsWith('ris_') && t.modality === 'USG');
+    } else if (activeTab === 'X-Ray & Fluoroscopy') {
+      list = list.filter(t => t.id.startsWith('ris_') && (t.modality === 'X-Ray' || t.modality === 'Fluoroscopy'));
     } else if (activeTab === 'Procedures') {
       list = list.filter(t => t.id.startsWith('proc_'));
     } else if (activeTab === 'Custom') {
@@ -134,7 +132,6 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
     );
   }, [allTemplatesList, activeTab, searchQuery]);
 
-  // Handle direct file upload (.docx or image)
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -146,10 +143,8 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
     try {
       const fileName = file.name;
       const isDocx = fileName.toLowerCase().endsWith('.docx');
-      const isImage = file.type.startsWith('image/');
 
       if (isDocx) {
-        // Direct DOCX upload & extraction
         const { lines, docxBase64 } = await extractLinesFromDocxBlob(file);
         if (lines.length === 0) {
           throw new Error('Could not extract text lines from this Word document.');
@@ -181,60 +176,8 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
         setPreviewTemplate(customSelected);
         setActiveTab('Custom');
         setUploadSuccess(`Successfully uploaded Word template: "${templateName}"!`);
-      } else if (isImage) {
-        // Image template upload -> Vision OCR and DOCX conversion
-        const extracted = await extractTemplateFromImage(file);
-        if (!extracted.lines || extracted.lines.length === 0) {
-          throw new Error('Could not identify template sections from this image.');
-        }
-
-        // Use base DOCX template to create real Word DOCX
-        const baseDocx = RADIOLOGY_TEMPLATES_CATALOG[0]?.docxBase64;
-        let generatedDocxBase64 = baseDocx;
-
-        try {
-          if (baseDocx) {
-            const mergedBlob = await mergeFindingsIntoDocx(baseDocx, extracted.lines, extracted.name);
-            const arrayBuf = await mergedBlob.arrayBuffer();
-            const bytes = new Uint8Array(arrayBuf);
-            let binary = '';
-            for (let i = 0; i < bytes.byteLength; i++) {
-              binary += String.fromCharCode(bytes[i]);
-            }
-            generatedDocxBase64 = btoa(binary);
-          }
-        } catch (e) {
-          console.warn('Docx generation for image template fallback:', e);
-        }
-
-        const templateName = extracted.name || fileName.replace(/\.[^/.]+$/, '');
-        const newTemplate: UserTemplate = {
-          id: `custom_img_${Date.now()}`,
-          name: templateName,
-          text: extracted.lines.join('\n'),
-          images: [],
-          createdAt: Date.now(),
-          ...({ docxBase64: generatedDocxBase64, modality: extracted.modality || 'Custom' } as any),
-        };
-
-        await saveUserTemplate(newTemplate);
-        if (onRefreshCustomTemplates) onRefreshCustomTemplates();
-
-        const customSelected: SelectedTemplateData = {
-          id: newTemplate.id,
-          name: newTemplate.name,
-          category: 'My Uploaded Templates',
-          modality: extracted.modality || 'Custom',
-          lines: extracted.lines,
-          docxBase64: generatedDocxBase64,
-          isCustom: true,
-        };
-
-        setPreviewTemplate(customSelected);
-        setActiveTab('Custom');
-        setUploadSuccess(`Successfully scanned & converted image to Word template: "${templateName}"!`);
       } else {
-        throw new Error('Please upload a .docx Word document or an image file (.png, .jpg).');
+        throw new Error('Please upload a .docx Word document file.');
       }
     } catch (err: any) {
       console.error('Template upload error:', err);
@@ -273,7 +216,7 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-2 sm:p-4"
+      className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-2 sm:p-4 animate-fade-in"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
@@ -294,17 +237,16 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
                 Select Radiology Report Template
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                560+ Native DOCX Formats (Dr. Gopinath MRI Protocols & Centricity RIS-i Normal Formats) + Custom Uploads
+                600+ Standard Formats (MRI Protocols, Vascular Doppler, CT & RIS Normal Formats)
               </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {/* Upload Button */}
             <input
               type="file"
               ref={fileInputRef}
               onChange={handleFileUpload}
-              accept=".docx,image/png,image/jpeg,image/jpg"
+              accept=".docx"
               className="hidden"
             />
             <button
@@ -321,7 +263,7 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
               ) : (
                 <>
                   <UploadIcon className="w-3.5 h-3.5" />
-                  <span>Upload Template (.docx / Image)</span>
+                  <span>Upload Template (.docx)</span>
                 </>
               )}
             </button>
@@ -335,7 +277,6 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
           </div>
         </header>
 
-        {/* Upload Notifications */}
         {uploadSuccess && (
           <div className="p-2.5 px-6 bg-emerald-50 dark:bg-emerald-950/40 border-b border-emerald-200 dark:border-emerald-800 text-xs text-emerald-800 dark:text-emerald-300 font-semibold flex justify-between items-center">
             <span>✓ {uploadSuccess}</span>
@@ -349,14 +290,14 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
           </div>
         )}
 
-        {/* Search & Category Filter Tabs */}
+        {/* Search & Tabs */}
         <div className="p-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex-shrink-0 space-y-3">
           <div className="relative">
             <input
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Search across 560+ templates (e.g. Brain, CT Brain Plain, Stroke, Spine, Knee, Abdomen, Chest, Doppler, Anomaly)..."
+              placeholder="Search across all templates (e.g. Brain, CT Brain Plain, Stroke, Spine, Knee, Doppler, Abdomen, Chest)..."
               className="w-full p-2.5 pl-10 border border-slate-300 dark:border-slate-700 rounded-xl bg-slate-50 text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-950 dark:text-white text-sm"
               aria-label="Search templates"
               autoFocus
@@ -374,16 +315,16 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
             )}
           </div>
 
-          {/* Filter Tabs */}
           <div className="flex gap-1.5 overflow-x-auto pb-1 no-scrollbar text-xs font-semibold">
             {[
               { id: 'ALL', label: `All (${allTemplatesList.length})` },
-              { id: 'Gopinath Formats', label: 'Dr. Gopinath MRI (20)' },
-              { id: 'Centricity CT', label: 'Centricity CT (55)' },
-              { id: 'Centricity MRI', label: 'Centricity MRI (18)' },
-              { id: 'Centricity USG', label: 'Centricity USG (54)' },
-              { id: 'Centricity X-Ray', label: 'X-Ray & Barium (37)' },
-              { id: 'Procedures', label: 'Procedures (349)' },
+              { id: 'Comprehensive MRI', label: 'MRI Protocols' },
+              { id: 'Vascular Doppler', label: 'Vascular Doppler' },
+              { id: 'Standard CT', label: 'CT Formats' },
+              { id: 'Standard MRI', label: 'Standard MRI' },
+              { id: 'Standard USG', label: 'Ultrasound' },
+              { id: 'X-Ray & Fluoroscopy', label: 'X-Ray' },
+              { id: 'Procedures', label: 'Special Procedures' },
               ...(allTemplatesList.some(t => t.isCustom)
                 ? [{ id: 'Custom', label: `My Custom (${allTemplatesList.filter(t => t.isCustom).length})` }]
                 : []),
@@ -404,7 +345,7 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
           </div>
         </div>
 
-        {/* Main Split View: Left = List, Right = Live Preview */}
+        {/* Split View */}
         <div className="flex-1 grid grid-cols-1 md:grid-cols-12 min-h-0 overflow-hidden">
           {/* Left Column: Template List */}
           <div className="md:col-span-6 lg:col-span-5 border-r border-slate-200 dark:border-slate-800 overflow-y-auto p-3 space-y-1.5 max-h-[55vh] md:max-h-[60vh]">
@@ -519,7 +460,7 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
                 <div className="flex-1 overflow-y-auto py-3 space-y-2 pr-1 font-sans text-xs">
                   {previewTemplate.lines && previewTemplate.lines.length > 0 ? (
                     previewTemplate.lines.map((line, idx) => {
-                      const isTitle = idx === 0 && (line.toUpperCase().includes('SCAN') || line.toUpperCase().includes('MRI') || line.toUpperCase().includes('C.T.'));
+                      const isTitle = idx === 0 && (line.toUpperCase().includes('SCAN') || line.toUpperCase().includes('MRI') || line.toUpperCase().includes('C.T.') || line.toUpperCase().includes('ULTRASOUND'));
                       const isImpression = line.toUpperCase().startsWith('IMPRESSION:');
                       const isProfile = line.toLowerCase().startsWith('clinical profile:');
                       const isTechnique = line.toLowerCase().startsWith('technique:') || line.toLowerCase().startsWith('mri technique:');
@@ -549,7 +490,7 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
                 </div>
 
                 <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex justify-between items-center text-[11px] text-slate-500 flex-shrink-0">
-                  <span>📄 Native DOCX Format Template</span>
+                  <span>📄 Native Word DOCX Format</span>
                   <span>✨ Automatically merges findings & preserves font styles</span>
                 </div>
               </div>

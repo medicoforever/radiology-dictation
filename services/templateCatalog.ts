@@ -9,7 +9,7 @@ export interface RadiologyDocxTemplate {
   lines: string[];
   docxBase64: string;
   source?: string;
-  sourceType?: 'gopinath' | 'centricity' | 'procedure' | 'custom' | 'doppler';
+  sourceType?: 'mri_proto' | 'ris' | 'procedure' | 'custom' | 'doppler';
   fileName?: string;
   relPath?: string;
 }
@@ -22,9 +22,9 @@ export const TEMPLATE_MODALITIES = [
   'CT',
   'USG',
   'X-Ray',
-  'Gopinath Formats',
-  'Doppler Protocols',
-  'Centricity Normals',
+  'Comprehensive MRI',
+  'Vascular Doppler',
+  'Hospital Standard RIS',
   'Fluoroscopy',
   'Mammography',
   'Procedures',
@@ -42,12 +42,12 @@ export function filterTemplates(
   let list = RADIOLOGY_TEMPLATES_CATALOG;
 
   if (modalityFilter && modalityFilter !== 'ALL') {
-    if (modalityFilter === 'Gopinath Formats') {
-      list = list.filter(t => t.id.startsWith('gopinath_') || t.id.startsWith('user_'));
-    } else if (modalityFilter === 'Doppler Protocols') {
-      list = list.filter(t => t.id.startsWith('doppler_'));
-    } else if (modalityFilter === 'Centricity Normals') {
-      list = list.filter(t => t.id.startsWith('centricity_'));
+    if (modalityFilter === 'Comprehensive MRI') {
+      list = list.filter(t => t.id.startsWith('mri_proto_') || t.id.startsWith('user_'));
+    } else if (modalityFilter === 'Vascular Doppler') {
+      list = list.filter(t => t.id.startsWith('usg_dop_'));
+    } else if (modalityFilter === 'Hospital Standard RIS') {
+      list = list.filter(t => t.id.startsWith('ris_'));
     } else if (modalityFilter === 'Procedures') {
       list = list.filter(t => t.id.startsWith('proc_'));
     } else {
@@ -69,35 +69,12 @@ export function filterTemplates(
   );
 }
 
-/**
- * Find template by ID
- */
 export function getTemplateById(id: string): RadiologyDocxTemplate | undefined {
   return RADIOLOGY_TEMPLATES_CATALOG.find(t => t.id === id);
-}
-
-/**
- * Generate formatted prompt text for Gemini from a template
- */
-export function formatTemplateForPrompt(template: RadiologyDocxTemplate): string {
-  const cleanTitle = template.name.trim();
-  const findingsList = template.lines.filter(l => l && l.trim() !== '');
-
-  const templateJson = {
-    title: cleanTitle,
-    category: template.category,
-    modality: template.modality,
-    code: template.code || undefined,
-    normal_findings: findingsList,
-    instruction: `Merge user dictated findings into this ${template.name} template. Preserve normal lines not mentioned, replace corresponding normal lines with abnormal dictated findings prefixed with 'BOLD::', and generate a synthesized IMPRESSION at the end.`
-  };
-
-  return JSON.stringify(templateJson, null, 2);
 }
 
 export default {
   RADIOLOGY_TEMPLATES_CATALOG,
   filterTemplates,
   getTemplateById,
-  formatTemplateForPrompt,
 };
