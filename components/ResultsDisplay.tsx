@@ -562,21 +562,17 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
   };
 
   const handleDownloadDocx = async () => {
-    if (!findings || findings.length === 0) return;
+    if (!findings || findings.length === 0) {
+      showNotification('No findings available to download as Word DOCX.');
+      return;
+    }
     try {
-      let templateBase64 = selectedTemplate?.docxBase64;
-      if (!templateBase64) {
-        templateBase64 = RADIOLOGY_TEMPLATES_CATALOG[0]?.docxBase64;
-      }
-      if (!templateBase64) {
-        showNotification('No template available for DOCX generation.');
-        return;
-      }
       const title = selectedTemplate?.name || findings[0] || 'Radiology_Report';
       const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
+      const templateBase64 = selectedTemplate?.docxBase64;
       const blob = await mergeFindingsIntoDocx(templateBase64, findings, title);
       downloadDocxBlob(blob, cleanFileName);
-      showNotification('Downloaded merged Word DOCX report!');
+      showNotification('Downloaded Word DOCX report (Times New Roman 12pt)!');
     } catch (err) {
       console.error('Failed to generate or download DOCX:', err);
       showNotification('Failed to generate DOCX file.');
