@@ -46,7 +46,7 @@ const App: React.FC = () => {
   const [chat, setChat] = useState<Chat | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [isChatting, setIsChatting] = useState<boolean>(false);
-  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.1-pro-preview');
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.5-flash');
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const [customImages, setCustomImages] = useState<Array<{ data: string; mimeType: string }>>([]);
   const [identifiedErrors, setIdentifiedErrors] = useState<IdentifiedError[]>([]);
@@ -589,35 +589,80 @@ const App: React.FC = () => {
         );
       case AppStatus.Error:
         return (
-          <div className="text-center p-8 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-500/30 rounded-lg">
-            <h3 className="text-xl font-semibold text-red-700 dark:text-red-300">An Error Occurred</h3>
-            <p className="text-red-600 dark:text-red-400 mt-2">{error}</p>
-            <p className="text-slate-600 dark:text-slate-300 mt-1 text-xs sm:text-sm">
-              {audioBlob ? 'Your recorded audio is safe and preserved below.' : 'Please try recording again.'}
+          <div className="max-w-2xl mx-auto text-center p-8 bg-red-50/80 dark:bg-red-950/30 border border-red-200 dark:border-red-800/60 rounded-2xl shadow-sm space-y-5">
+            <h3 className="text-2xl font-bold text-red-700 dark:text-red-300">An Error Occurred</h3>
+            <p className="text-sm text-red-600 dark:text-red-300 bg-white/80 dark:bg-slate-900/60 p-4 rounded-xl border border-red-200 dark:border-red-900/60 font-mono text-xs text-left max-w-xl mx-auto">
+              {error || 'An unexpected error occurred during audio processing.'}
             </p>
-            <div className="mt-6 flex flex-wrap justify-center items-center gap-3 sm:gap-4">
-              {audioBlob && (
-                <button
-                  onClick={() => handleRecordingComplete(audioBlob)}
-                  className="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition-colors shadow"
+            <p className="text-slate-600 dark:text-slate-300 text-sm">
+              {audioBlob ? 'Your recorded audio is preserved. You can download it, change the model to retry, or upload a different audio file.' : 'Please try recording or uploading an audio file again.'}
+            </p>
+
+            <div className="bg-white dark:bg-slate-800 p-5 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm max-w-xl mx-auto space-y-4">
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 text-sm">
+                <label htmlFor="single-error-model-select" className="font-bold text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                  Select Model to Retry:
+                </label>
+                <select 
+                  id="single-error-model-select"
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  className="bg-slate-50 border border-slate-300 text-slate-900 text-sm font-semibold rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 w-full sm:w-auto dark:bg-slate-700 dark:border-slate-600 dark:text-white"
                 >
-                  Retry Processing Audio
-                </button>
-              )}
-              {audioBlob && (
+                  <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
+                  <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+                  <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                  <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
+                  <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                  <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite</option>
+                </select>
+              </div>
+
+              <div className="flex flex-wrap justify-center items-center gap-3 pt-3 border-t dark:border-slate-700">
+                {audioBlob && (
+                  <button
+                    onClick={handleDownload}
+                    className="bg-slate-700 hover:bg-slate-800 text-white font-bold py-2.5 px-5 rounded-xl shadow transition-colors flex items-center gap-2 text-sm"
+                    title="Download audio recording safely to your device"
+                  >
+                    <DownloadIcon className="w-4 h-4" />
+                    Download Audio File
+                  </button>
+                )}
+
+                <label className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-5 rounded-xl shadow transition-colors flex items-center gap-2 text-sm cursor-pointer">
+                  <UploadIcon className="w-4 h-4" />
+                  <span>Upload & Process Audio</span>
+                  <input
+                    type="file"
+                    accept="audio/*,.mp3,.wav,.ogg,.m4a,.webm"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        handleRecordingComplete(file);
+                        e.target.value = '';
+                      }
+                    }}
+                    className="hidden"
+                  />
+                </label>
+
+                {audioBlob && (
+                  <button
+                    onClick={() => handleRecordingComplete(audioBlob)}
+                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-5 rounded-xl shadow transition-colors text-sm"
+                  >
+                    Retry Current Audio
+                  </button>
+                )}
+
                 <button
-                  onClick={handleDownload}
-                  className="bg-slate-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-opacity-50 transition-colors shadow"
+                  onClick={resetSingleMode}
+                  className="bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200 font-bold py-2.5 px-5 rounded-xl hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors text-sm"
                 >
-                  Download Recorded Audio
+                  Start Fresh
                 </button>
-              )}
-              <button
-                onClick={resetSingleMode}
-                className="bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200 font-bold py-2 px-6 rounded-lg hover:bg-slate-300 dark:hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-opacity-50 transition-colors"
-              >
-                Start New Recording
-              </button>
+              </div>
             </div>
           </div>
         );
@@ -695,12 +740,10 @@ const App: React.FC = () => {
                   onChange={(e) => setSelectedModel(e.target.value)}
                   className="bg-slate-100 dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-800 dark:text-slate-100 text-xs font-bold rounded-lg p-1.5 focus:ring-2 focus:ring-blue-500"
                 >
-                  <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Recommended)</option>
-                  <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                  <option value="gemini-3.5-flash">Gemini 3.5 Flash (Default)</option>
                   <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                   <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
                   <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
-                  <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
                   <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                   <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite</option>
                 </select>
