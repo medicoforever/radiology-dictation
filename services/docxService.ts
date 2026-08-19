@@ -328,30 +328,13 @@ function extractTemplateStyling(docXml: string): {
 }
 
 /**
- * Merge an array of findings into a DOCX template while preserving 100% of formatting, styles, and layout!
+ * Generate a clean, 100% valid Word OpenXML (.docx) from structured findings in Times New Roman 12pt
  */
-export async function mergeFindingsIntoDocx(
-  templateDocxBase64: string,
+export async function generateDocxFromFindings(
   findings: string[],
   fallbackTitle?: string
 ): Promise<Blob> {
-  const templateBytes = base64ToUint8Array(templateDocxBase64);
-  const zipEntries = await parseZip(templateBytes.buffer);
-
-  let docXmlEntry = zipEntries.get('word/document.xml');
-  if (!docXmlEntry) {
-    throw new Error('Invalid DOCX template: missing word/document.xml');
-  }
-
-  const decoder = new TextDecoder('utf-8');
-  const originalDocXml = decoder.decode(docXmlEntry.data);
-
-  // Extract font family, size, line spacing, margins
-  const style = extractTemplateStyling(originalDocXml);
-
   const parsedFindings = parseFindingLines(findings);
-
-  // Build the new <w:body> XML with exact template fonts, sizes, paragraph styles, and boldings
   const bodyXmlParts: string[] = [];
 
   const rPrDefault = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>`;
@@ -391,32 +374,179 @@ export async function mergeFindingsIntoDocx(
     }
   }
 
-  // Preserve Section Properties at the bottom of the body
-  if (style.sectPrXml) {
-    bodyXmlParts.push(style.sectPrXml);
+  const defaultSectPr = `
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/>
+      <w:cols w:space="720"/>
+      <w:docGrid w:linePitch="360"/>
+    </w:sectPr>
+  `;
+
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
+            xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:w10="urn:schemas-microsoft-com:office:word"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  <w:body>
+    ${bodyXmlParts.join('')}
+    ${defaultSectPr}
+  </w:body>
+</w:document>`;
+
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+  <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
+</Types>`;
+
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+
+  const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
+</Relationships>`;
+
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>
+        <w:sz w:val="24"/>
+        <w:szCs w:val="24"/>
+      </w:rPr>
+    </w:rPrDefault>
+  </w:docDefaults>
+</w:styles>`;
+
+  const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:defaultTabStop w:val="720"/>
+</w:settings>`;
+
+  const encoder = new TextEncoder();
+  const entries = new Map<string, Uint8Array>();
+  entries.set('[Content_Types].xml', encoder.encode(contentTypesXml));
+  entries.set('_rels/.rels', encoder.encode(relsXml));
+  entries.set('word/_rels/document.xml.rels', encoder.encode(docRelsXml));
+  entries.set('word/document.xml', encoder.encode(documentXml));
+  entries.set('word/styles.xml', encoder.encode(stylesXml));
+  entries.set('word/settings.xml', encoder.encode(settingsXml));
+
+  return createZip(entries);
+}
+
+/**
+ * Merge an array of findings into a DOCX template while preserving 100% of formatting, styles, and layout!
+ */
+export async function mergeFindingsIntoDocx(
+  templateDocxBase64?: string,
+  findings: string[] = [],
+  fallbackTitle?: string
+): Promise<Blob> {
+  if (!templateDocxBase64 || !templateDocxBase64.trim()) {
+    return generateDocxFromFindings(findings, fallbackTitle);
   }
 
-  const newBodyContent = bodyXmlParts.join('');
+  try {
+    const templateBytes = base64ToUint8Array(templateDocxBase64);
+    const zipEntries = await parseZip(templateBytes.buffer);
 
-  // Replace <w:body>...</w:body> in the original document.xml
-  const modifiedDocXml = originalDocXml.replace(
-    /<w:body>[\s\S]*?<\/w:body>/i,
-    `<w:body>${newBodyContent}</w:body>`
-  );
-
-  // Prepare updated zip entries map
-  const updatedEntries = new Map<string, Uint8Array>();
-  for (const [name, entry] of zipEntries) {
-    if (name === 'word/document.xml') {
-      const updatedBytes = new TextEncoder().encode(modifiedDocXml);
-      updatedEntries.set(name, updatedBytes);
-    } else {
-      updatedEntries.set(name, entry.data);
+    let docXmlEntry = zipEntries.get('word/document.xml');
+    if (!docXmlEntry) {
+      return generateDocxFromFindings(findings, fallbackTitle);
     }
-  }
 
-  // Re-package into valid Word DOCX file
-  return createZip(updatedEntries);
+    const decoder = new TextDecoder('utf-8');
+    const originalDocXml = decoder.decode(docXmlEntry.data);
+
+    // Extract font family, size, line spacing, margins
+    const style = extractTemplateStyling(originalDocXml);
+
+    const parsedFindings = parseFindingLines(findings);
+
+    // Build the new <w:body> XML with exact template fonts, sizes, paragraph styles, and boldings
+    const bodyXmlParts: string[] = [];
+
+    const rPrDefault = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>`;
+    const rPrBold = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:b/><w:bCs/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>`;
+    const rPrItalic = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:i/><w:iCs/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>`;
+    const rPrTitle = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:b/><w:bCs/><w:u w:val="single"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>`;
+
+    for (const item of parsedFindings) {
+      if (item.type === 'title') {
+        bodyXmlParts.push(
+          `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:r>${rPrTitle}<w:t xml:space="preserve">${escapeXml(item.text)}</w:t></w:r></w:p>`
+        );
+      } else if (item.type === 'profile') {
+        bodyXmlParts.push(
+          `<w:p><w:pPr><w:spacing w:after="120" w:line="240" w:lineRule="auto"/></w:pPr><w:r>${rPrItalic}<w:t xml:space="preserve">Clinical Profile: ${escapeXml(item.text.replace(/^Clinical Profile:\s*/i, ''))}</w:t></w:r></w:p>`
+        );
+      } else if (item.type === 'technique') {
+        bodyXmlParts.push(
+          `<w:p><w:pPr><w:spacing w:after="120" w:line="240" w:lineRule="auto"/></w:pPr><w:r>${rPrDefault}<w:t xml:space="preserve">${escapeXml(item.text)}</w:t></w:r></w:p>`
+        );
+      } else if (item.type === 'finding_bold') {
+        bodyXmlParts.push(
+          `<w:p><w:pPr><w:spacing w:after="100" w:line="240" w:lineRule="auto"/></w:pPr><w:r>${rPrBold}<w:t xml:space="preserve">${escapeXml(item.text)}</w:t></w:r></w:p>`
+        );
+      } else if (item.type === 'impression_header') {
+        bodyXmlParts.push(
+          `<w:p><w:pPr><w:spacing w:before="160" w:after="80" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:b/><w:bCs/><w:u w:val="single"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr><w:t xml:space="preserve">IMPRESSION:</w:t></w:r></w:p>`
+        );
+      } else if (item.type === 'impression_point') {
+        bodyXmlParts.push(
+          `<w:p><w:pPr><w:ind w:left="360" w:hanging="240"/><w:spacing w:after="80" w:line="240" w:lineRule="auto"/></w:pPr><w:r>${rPrBold}<w:t xml:space="preserve">&#x2022;  ${escapeXml(item.text)}</w:t></w:r></w:p>`
+        );
+      } else {
+        bodyXmlParts.push(
+          `<w:p><w:pPr><w:spacing w:after="100" w:line="240" w:lineRule="auto"/></w:pPr><w:r>${rPrDefault}<w:t xml:space="preserve">${escapeXml(item.text)}</w:t></w:r></w:p>`
+        );
+      }
+    }
+
+    // Preserve Section Properties at the bottom of the body
+    if (style.sectPrXml) {
+      bodyXmlParts.push(style.sectPrXml);
+    }
+
+    const newBodyContent = bodyXmlParts.join('');
+
+    // Replace <w:body>...</w:body> in the original document.xml
+    const modifiedDocXml = originalDocXml.replace(
+      /<w:body>[\s\S]*?<\/w:body>/i,
+      `<w:body>${newBodyContent}</w:body>`
+    );
+
+    // Prepare updated zip entries map
+    const updatedEntries = new Map<string, Uint8Array>();
+    for (const [name, entry] of zipEntries) {
+      if (name === 'word/document.xml') {
+        const updatedBytes = new TextEncoder().encode(modifiedDocXml);
+        updatedEntries.set(name, updatedBytes);
+      } else {
+        updatedEntries.set(name, entry.data);
+      }
+    }
+
+    // Re-package into valid Word DOCX file
+    return createZip(updatedEntries);
+  } catch (e) {
+    console.warn('mergeFindingsIntoDocx fallback to generateDocxFromFindings:', e);
+    return generateDocxFromFindings(findings, fallbackTitle);
+  }
 }
 
 /**
