@@ -300,8 +300,8 @@ function extractTemplateStyling(docXml: string): {
   spaceAfter: string;
   sectPrXml: string;
 } {
-  let fontFamily = 'Calibri';
-  let fontSize = '22'; // 11pt default
+  let fontFamily = 'Times New Roman';
+  let fontSize = '24'; // 12pt standard (24 half-points)
   let lineSpacing = '240';
   let spaceAfter = '120';
   let sectPrXml = '';
@@ -309,13 +309,13 @@ function extractTemplateStyling(docXml: string): {
   // 1. Extract Font Family from first w:rFonts in document
   const fontMatch = docXml.match(/<w:rFonts[^>]*w:ascii="([^"]+)"/i) || docXml.match(/<w:rFonts[^>]*w:hAnsi="([^"]+)"/i);
   if (fontMatch && fontMatch[1]) {
-    fontFamily = fontMatch[1];
+    fontFamily = 'Times New Roman';
   }
 
   // 2. Extract Font Size
   const sizeMatch = docXml.match(/<w:sz[^>]*w:val="([^"]+)"/i);
   if (sizeMatch && sizeMatch[1]) {
-    fontSize = sizeMatch[1];
+    fontSize = '24';
   }
 
   // 3. Extract Section Properties (Page Margins, Header/Footer references)
@@ -324,7 +324,7 @@ function extractTemplateStyling(docXml: string): {
     sectPrXml = sectPrMatch[0];
   }
 
-  return { fontFamily, fontSize, lineSpacing, spaceAfter, sectPrXml };
+  return { fontFamily: 'Times New Roman', fontSize: '24', lineSpacing, spaceAfter, sectPrXml };
 }
 
 /**
@@ -354,10 +354,10 @@ export async function mergeFindingsIntoDocx(
   // Build the new <w:body> XML with exact template fonts, sizes, paragraph styles, and boldings
   const bodyXmlParts: string[] = [];
 
-  const rPrDefault = `<w:rPr><w:rFonts w:ascii="${escapeXml(style.fontFamily)}" w:hAnsi="${escapeXml(style.fontFamily)}" w:cs="${escapeXml(style.fontFamily)}"/><w:sz w:val="${style.fontSize}"/><w:szCs w:val="${style.fontSize}"/></w:rPr>`;
-  const rPrBold = `<w:rPr><w:rFonts w:ascii="${escapeXml(style.fontFamily)}" w:hAnsi="${escapeXml(style.fontFamily)}" w:cs="${escapeXml(style.fontFamily)}"/><w:b/><w:bCs/><w:sz w:val="${style.fontSize}"/><w:szCs w:val="${style.fontSize}"/></w:rPr>`;
-  const rPrItalic = `<w:rPr><w:rFonts w:ascii="${escapeXml(style.fontFamily)}" w:hAnsi="${escapeXml(style.fontFamily)}" w:cs="${escapeXml(style.fontFamily)}"/><w:i/><w:iCs/><w:sz w:val="${style.fontSize}"/><w:szCs w:val="${style.fontSize}"/></w:rPr>`;
-  const rPrTitle = `<w:rPr><w:rFonts w:ascii="${escapeXml(style.fontFamily)}" w:hAnsi="${escapeXml(style.fontFamily)}" w:cs="${escapeXml(style.fontFamily)}"/><w:b/><w:bCs/><w:u w:val="single"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>`;
+  const rPrDefault = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>`;
+  const rPrBold = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:b/><w:bCs/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>`;
+  const rPrItalic = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:i/><w:iCs/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>`;
+  const rPrTitle = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:b/><w:bCs/><w:u w:val="single"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>`;
 
   for (const item of parsedFindings) {
     if (item.type === 'title') {
@@ -378,7 +378,7 @@ export async function mergeFindingsIntoDocx(
       );
     } else if (item.type === 'impression_header') {
       bodyXmlParts.push(
-        `<w:p><w:pPr><w:spacing w:before="160" w:after="80" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${escapeXml(style.fontFamily)}" w:hAnsi="${escapeXml(style.fontFamily)}" w:cs="${escapeXml(style.fontFamily)}"/><w:b/><w:bCs/><w:u w:val="single"/><w:sz w:val="${style.fontSize}"/><w:szCs w:val="${style.fontSize}"/></w:rPr><w:t xml:space="preserve">IMPRESSION:</w:t></w:r></w:p>`
+        `<w:p><w:pPr><w:spacing w:before="160" w:after="80" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:b/><w:bCs/><w:u w:val="single"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr><w:t xml:space="preserve">IMPRESSION:</w:t></w:r></w:p>`
       );
     } else if (item.type === 'impression_point') {
       bodyXmlParts.push(
