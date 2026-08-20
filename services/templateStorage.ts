@@ -1,14 +1,15 @@
-// IndexedDB service for storing custom report templates permanently in the browser
-export interface UserTemplate {
+// IndexedDB Storage Service for Custom User Templates (Text + Multi-Image Screenshots)
+
+export interface CustomTemplate {
   id: string;
   name: string;
-  text: string;
+  textContent: string;
   images: Array<{ data: string; mimeType: string }>;
   createdAt: number;
 }
 
-const DB_NAME = 'RadiologyDictationTemplatesDB';
-const STORE_TEMPLATES = 'user_templates';
+const DB_NAME = 'RadiologyDictationCustomTemplatesDB';
+const STORE_TEMPLATES = 'custom_templates';
 const DB_VERSION = 1;
 
 let dbPromise: Promise<IDBDatabase | null> | null = null;
@@ -18,7 +19,7 @@ function getDB(): Promise<IDBDatabase | null> {
     return dbPromise;
   }
 
-  dbPromise = new Promise<IDBDatabase | null>((resolve) => {
+  const currentPromise = new Promise<IDBDatabase | null>((resolve) => {
     if (typeof window === 'undefined' || !window.indexedDB) {
       resolve(null);
       return;
@@ -36,111 +37,123 @@ function getDB(): Promise<IDBDatabase | null> {
 
       request.onsuccess = () => {
         const db = request.result;
-        db.onversionchange = () => {
-          try { db.close(); } catch {}
-          dbPromise = null;
-        };
-        db.onerror = () => {
-          dbPromise = null;
-        };
         resolve(db);
       };
 
-      request.onerror = (e) => {
-        console.error('Failed to open templates database:', e);
+      request.onerror = () => {
         dbPromise = null;
         resolve(null);
       };
-
-      request.onblocked = () => {
-        console.warn('Templates database open blocked');
-        dbPromise = null;
-        resolve(null);
-      };
-    } catch (err) {
-      console.error('Error opening templates database:', err);
+    } catch (e) {
       dbPromise = null;
       resolve(null);
     }
+  });
+
+  dbPromise = currentPromise.then((db) => {
+    if (!db) {
+      dbPromise = null;
+    }
+    return db;
   });
 
   return dbPromise;
 }
 
 /**
- * Save a custom template permanently
+ * Saves a custom template (name, text, and multiple screenshot images) into browser IndexedDB
  */
-export async function saveUserTemplate(template: Omit<UserTemplate, 'createdAt'>): Promise<void> {
+export async function saveCustomTemplate(
+  name: string,
+  textContent: string,
+  images: Array<{ data: string; mimeType: string }> = []
+): Promise<CustomTemplate | null> {
   try {
     const db = await getDB();
-    if (!db) {
-      throw new Error('Database not available');
-    }
+    if (!db) return null;
 
-    const fullTemplate: UserTemplate = {
-      ...template,
+    const id = `template_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const templateRecord: CustomTemplate = {
+      id,
+      name: name.trim() || 'Untitled Template',
+      textContent: textContent || '',
+      images: images || [],
       createdAt: Date.now(),
     };
 
-    return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_TEMPLATES, 'readwrite');
-      const store = tx.objectStore(STORE_TEMPLATES);
-      const req = store.put(fullTemplate);
+    const tx = db.transaction(STORE_TEMPLATES, 'readwrite');
+    const store = tx.objectStore(STORE_TEMPLATES);
+    store.put(templateRecord);
 
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error || new Error('Failed to save template'));
-    });
+    return templateRecord;
   } catch (err) {
-    console.error('saveUserTemplate error:', err);
-    throw err;
+    console.error('Failed to save custom template to IndexedDB:', err);
+    return null;
   }
 }
 
 /**
- * Retrieve all custom templates
+ * Retrieves all saved custom templates from browser IndexedDB
  */
-export async function getUserTemplates(): Promise<UserTemplate[]> {
+export async function getAllCustomTemplates(): Promise<CustomTemplate[]> {
   try {
     const db = await getDB();
     if (!db) return [];
 
-    return new Promise<UserTemplate[]>((resolve, reject) => {
-      const tx = db.transaction(STORE_TEMPLATES, 'readonly');
-      const store = tx.objectStore(STORE_TEMPLATES);
-      const req = store.getAll();
+    const tx = db.transaction(STORE_TEMPLATES, 'readonly');
+    const store = tx.objectStore(STORE_TEMPLATES);
 
+    return new Promise((resolve) => {
+      const req = store.getAll();
       req.onsuccess = () => {
-        const results = req.result as UserTemplate[];
-        // Sort by name or createdAt
-        results.sort((a, b) => b.createdAt - a.createdAt);
-        resolve(results);
+        const result = (req.result as CustomTemplate[]) || [];
+        // Sort newest first
+        result.sort((a, b) => b.createdAt - a.createdAt);
+        resolve(result);
       };
-      req.onerror = () => reject(req.error || new Error('Failed to fetch templates'));
+      req.onerror = () => resolve([]);
     });
   } catch (err) {
-    console.error('getUserTemplates error:', err);
+    console.error('Failed to load custom templates from IndexedDB:', err);
     return [];
   }
 }
 
 /**
- * Delete a custom template
+ * Deletes a saved custom template by ID from browser IndexedDB
  */
-export async function deleteUserTemplate(id: string): Promise<void> {
+export async function deleteCustomTemplate(id: string): Promise<boolean> {
   try {
     const db = await getDB();
-    if (!db) return;
+    if (!db) return false;
 
-    return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_TEMPLATES, 'readwrite');
-      const store = tx.objectStore(STORE_TEMPLATES);
-      const req = store.delete(id);
-
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error || new Error('Failed to delete template'));
-    });
+    const tx = db.transaction(STORE_TEMPLATES, 'readwrite');
+    const store = tx.objectStore(STORE_TEMPLATES);
+    store.delete(id);
+    return true;
   } catch (err) {
-    console.error('deleteUserTemplate error:', err);
-    throw err;
+    console.error(`Failed to delete custom template [${id}]:`, err);
+    return false;
   }
 }
+
+// Aliases for compatibility
+export type UserTemplate = CustomTemplate & { text?: string; docxBase64?: string; modality?: string };
+
+export async function saveUserTemplate(template: any): Promise<any> {
+  const text = template.textContent || template.text || '';
+  return saveCustomTemplate(template.name || 'Untitled Template', text, template.images || []);
+}
+
+export async function getUserTemplates(): Promise<UserTemplate[]> {
+  const list = await getAllCustomTemplates();
+  return list.map(item => ({
+    ...item,
+    text: item.textContent,
+  }));
+}
+
+export async function deleteUserTemplate(id: string): Promise<boolean> {
+  return deleteCustomTemplate(id);
+}
+

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import AudioRecorder from './components/AudioRecorder';
 import ResultsDisplay from './components/ResultsDisplay';
 import { AppStatus, IdentifiedError } from './types';
@@ -43,6 +43,8 @@ const App: React.FC = () => {
   const [findings, setFindings] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+  const isCancelledRef = useRef<boolean>(false);
+
   const [chat, setChat] = useState<Chat | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [isChatting, setIsChatting] = useState<boolean>(false);
@@ -220,12 +222,19 @@ const App: React.FC = () => {
     checkForErrors();
   }, [findings, status, selectedModel, isErrorCheckEnabled]);
 
+  const handleCancelProcessing = useCallback(() => {
+    isCancelledRef.current = true;
+    setStatus(AppStatus.Idle);
+    setError(null);
+  }, []);
+
   const handleRecordingComplete = useCallback(async (audioBlob: Blob) => {
     if (!audioBlob || audioBlob.size === 0) {
       setError('Recording or upload failed. The audio file is empty.');
       setStatus(AppStatus.Error);
       return;
     }
+    isCancelledRef.current = false;
     setStatus(AppStatus.Processing);
     setError(null);
     setFindings([]);
@@ -240,6 +249,7 @@ const App: React.FC = () => {
         undefined,
         selectedTemplate
       );
+      if (isCancelledRef.current) return;
       setFindings(processedText);
 
       // DOCX merge & auto-download ONLY if template is selected
@@ -250,25 +260,31 @@ const App: React.FC = () => {
             const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
             const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
             const blob = await mergeFindingsIntoDocx(docxBase64, processedText, title);
-            downloadDocxBlob(blob, cleanFileName);
+            if (!isCancelledRef.current) {
+              downloadDocxBlob(blob, cleanFileName);
+            }
           }
         } catch (docErr) {
           console.warn('Auto DOCX download error:', docErr);
         }
       }
 
+      if (isCancelledRef.current) return;
       const chatSession = await createChat(audioBlob, processedText, customPrompt, customImages);
+      if (isCancelledRef.current) return;
       setChat(chatSession);
       const aiGreeting = "I have reviewed the audio and the transcript. How can I help you further?";
       setChatHistory([{ author: 'AI', text: `${processedText.join('\n\n')}\n\n${aiGreeting}` }]);
       
       setStatus(AppStatus.Success);
     } catch (err) {
+      if (isCancelledRef.current) return;
       console.error(err);
       setError(err instanceof Error ? err.message : 'An unknown error occurred during processing.');
       setStatus(AppStatus.Error);
     }
   }, [selectedModel, customPrompt, customImages, selectedTemplate, autoDownloadDocx]);
+
   
   const handleLiveDictationComplete = useCallback(async (transcript: string, audioBlob: Blob | null) => {
     setStatus(AppStatus.Processing);
@@ -541,26 +557,34 @@ const App: React.FC = () => {
         );
       case AppStatus.Processing:
         return (
-          <div className="text-center p-8">
-            <Spinner />
-            <p className="text-slate-600 dark:text-slate-300 mt-4 text-lg font-medium">
-              {selectedTemplate ? `Integrating findings into ${selectedTemplate.name}...` : 'Analyzing and correcting dictation...'}
+          <div className="text-center p-8 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 max-w-xl mx-auto my-6">
+            <Spinner className="w-12 h-12 mx-auto text-blue-600 mb-2" />
+            <p className="text-slate-700 dark:text-slate-200 mt-4 text-xl font-semibold">
+              {selectedTemplate ? `Integrating findings into ${selectedTemplate.name}...` : 'Analyzing and correcting text...'}
             </p>
             <p className="text-slate-500 dark:text-slate-400 mt-2 text-sm">
               {selectedTemplate && autoDownloadDocx ? 'Your formatted Word DOCX report will be downloaded automatically.' : 'This may take a moment.'}
             </p>
-            {audioBlob && (
-                <div className="mt-6">
-                    <button
-                        onClick={handleDownload}
-                        className="bg-slate-500 text-white font-bold py-2 px-6 rounded-lg hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-opacity-50 transition-colors"
-                    >
-                        Download Audio
-                    </button>
-                </div>
-            )}
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+              <button
+                onClick={handleCancelProcessing}
+                className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2.5 px-6 rounded-xl shadow transition-colors focus:outline-none focus:ring-2 focus:ring-red-400"
+                aria-label="Cancel processing"
+              >
+                Cancel
+              </button>
+              {audioBlob && (
+                <button
+                  onClick={handleDownload}
+                  className="bg-slate-500 text-white font-semibold py-2.5 px-6 rounded-xl hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-400 transition-colors"
+                >
+                  Download File
+                </button>
+              )}
+            </div>
           </div>
         );
+
       case AppStatus.Success:
         return (
           <ResultsDisplay 

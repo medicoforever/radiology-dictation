@@ -3,6 +3,7 @@ import { DEFAULT_GEMINI_PROMPT, REPROCESS_GEMINI_PROMPT, TEMPLATE_GEMINI_PROMPT,
 import { IdentifiedError } from "../types";
 import { RADIOLOGY_TEMPLATES_CATALOG } from "./templateCatalog";
 import { SelectedTemplateData } from "../components/ui/TemplateSelectionModal";
+import { extractTextFromDocxBlob } from "./docxService";
 
 if (!process.env.API_KEY) {
     throw new Error("API_KEY environment variable not set");
@@ -15,7 +16,7 @@ export const blobToBase64 = (blob: Blob): Promise<string> => {
     const reader = new FileReader();
     reader.onloadend = () => {
       const base64data = reader.result as string;
-      // remove the "data:audio/ogg;base64," part
+      // remove the "data:...;base64," part
       resolve(base64data.split(',')[1]);
     };
     reader.onerror = reject;
@@ -39,20 +40,80 @@ export const base64ToBlob = (base64: string, mimeType: string): Blob => {
   }
 };
 
+export const isDocxBlob = (blob: Blob, fileName?: string): boolean => {
+  const name = (fileName || (blob as any).name || '').toLowerCase();
+  if (name.endsWith('.docx') || name.endsWith('.doc')) return true;
+  if (blob.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || blob.type === 'application/msword') return true;
+  return false;
+};
 
-const getCleanMimeType = (blob: Blob): string => {
+export const isTextBlob = (blob: Blob, fileName?: string): boolean => {
+  const name = (fileName || (blob as any).name || '').toLowerCase();
+  if (name.endsWith('.txt') || name.endsWith('.csv') || name.endsWith('.json') || name.endsWith('.md') || name.endsWith('.rtf') || name.endsWith('.log')) return true;
+  if (blob.type.startsWith('text/') || blob.type === 'application/json' || blob.type === 'text/csv' || blob.type === 'text/plain') return true;
+  return false;
+};
+
+export const getCleanMimeType = (blob: Blob, fileName?: string): string => {
     let mimeType = blob.type;
+    const name = (fileName || (blob as any).name || '').toLowerCase();
+    
+    if (name.endsWith('.pdf')) return 'application/pdf';
+    if (name.endsWith('.mp3')) return 'audio/mp3';
+    if (name.endsWith('.wav')) return 'audio/wav';
+    if (name.endsWith('.m4a')) return 'audio/m4a';
+    if (name.endsWith('.aac')) return 'audio/aac';
+    if (name.endsWith('.flac')) return 'audio/flac';
+    if (name.endsWith('.ogg')) return 'audio/ogg';
+    if (name.endsWith('.mp4')) return 'video/mp4';
+    if (name.endsWith('.mov')) return 'video/quicktime';
+    if (name.endsWith('.avi')) return 'video/x-msvideo';
+    if (name.endsWith('.png')) return 'image/png';
+    if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
+    if (name.endsWith('.webp')) return 'image/webp';
+    if (name.endsWith('.gif')) return 'image/gif';
+
     if (!mimeType) {
-        // Fallback for files without a MIME type, maintaining original behavior.
         return 'audio/ogg';
     }
-    // Handle WebM variations. It can be audio/webm or video/webm for audio-only files.
-    // Also, strip codec information which might not be supported by the API.
     if (mimeType.startsWith('audio/webm') || mimeType.startsWith('video/webm')) {
         return 'audio/webm';
     }
-    // For other types, just strip potential codec/parameter info
     return mimeType.split(';')[0];
+};
+
+export const prepareFileContentPart = async (blob: Blob, fileName?: string): Promise<{ textPart?: { text: string }; inlinePart?: { inlineData: { mimeType: string; data: string } } }> => {
+  const name = fileName || (blob as any).name || '';
+  if (isDocxBlob(blob, name)) {
+    const text = await extractTextFromDocxBlob(blob);
+    return {
+      textPart: {
+        text: `[Attached Word DOCX Context - ${name || 'Document'}]:\n${text || '(No readable text extracted)'}\n`
+      }
+    };
+  }
+  if (isTextBlob(blob, name)) {
+    try {
+      const text = await blob.text();
+      return {
+        textPart: {
+          text: `[Attached Text Document Context - ${name || 'Document'}]:\n${text}\n`
+        }
+      };
+    } catch {
+      // Fallback to binary encoding below
+    }
+  }
+  const base64 = await blobToBase64(blob);
+  const mimeType = getCleanMimeType(blob, name);
+  return {
+    inlinePart: {
+      inlineData: {
+        mimeType: mimeType,
+        data: base64,
+      }
+    }
+  };
 };
 
 const responseSchema = {
@@ -76,7 +137,8 @@ export const processAudio = async (
   existingFindings?: string[],
   selectedTemplate?: SelectedTemplateData | null
 ): Promise<string[]> => {
-  const base64Audio = await blobToBase64(audioBlob);
+  const fileName = (audioBlob as any).name;
+  const fileContent = await prepareFileContentPart(audioBlob, fileName);
 
   const useTemplate = customPrompt?.toLowerCase().includes('report template') || !!selectedTemplate;
   let basePrompt: string;
@@ -129,7 +191,7 @@ export const processAudio = async (
         });
     }
     parts.push({
-      text: `The user has provided ${customImages.length > 1 ? 'images' : 'an image'}. Use ${customImages.length > 1 ? 'them' : 'it'} as a strict visual guide for the structure, layout, and formatting of the final report. The following instructions and audio dictation should be used to populate this template.`
+      text: `The user has provided ${customImages.length > 1 ? 'images' : 'an image'}. Use ${customImages.length > 1 ? 'them' : 'it'} as a strict visual guide for the structure, layout, and formatting of the final report. The following instructions and context/dictation should be used to populate this template.`
     });
   }
   
@@ -138,12 +200,13 @@ export const processAudio = async (
   }
 
   parts.push({ text: prompt });
-  parts.push({
-    inlineData: {
-      mimeType: getCleanMimeType(audioBlob),
-      data: base64Audio,
-    },
-  });
+  if (fileContent.textPart) {
+    parts.push(fileContent.textPart);
+  }
+  if (fileContent.inlinePart) {
+    parts.push(fileContent.inlinePart);
+  }
+
   
   try {
     const response: GenerateContentResponse = await ai.models.generateContent({
@@ -469,7 +532,8 @@ export const createChat = async (
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null
 ): Promise<Chat> => {
-  const base64Audio = await blobToBase64(audioBlob);
+  const fileName = (audioBlob as any).name;
+  const fileContent = await prepareFileContentPart(audioBlob, fileName);
   
   const userMessageParts: any[] = [];
 
@@ -485,16 +549,17 @@ export const createChat = async (
     userMessageParts.push({ text: `This is the report template${customImages.length > 1 ? 's' : ''} I provided.` });
   }
 
-  userMessageParts.push({
-    inlineData: {
-      mimeType: getCleanMimeType(audioBlob),
-      data: base64Audio,
-    },
-  });
-  userMessageParts.push({ text: `This is the audio I dictated.` });
+  if (fileContent.textPart) {
+    userMessageParts.push(fileContent.textPart);
+  }
+  if (fileContent.inlinePart) {
+    userMessageParts.push(fileContent.inlinePart);
+  }
+  userMessageParts.push({ text: `This is the file / clinical context I provided.` });
   
 
   const modelResponsePart = { text: `This is the transcript you requested:\n\n${initialFindings.join('\n\n')}` };
+
 
   let systemInstruction = 'You are a helpful AI assistant for a radiologist. The user has provided an audio dictation and you have transcribed it. Now, answer the user\'s follow-up questions based on the content of the audio and the transcript.';
   if (customPrompt) {
