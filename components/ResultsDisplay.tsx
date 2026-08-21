@@ -936,8 +936,9 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
     setUndoState([...findings]);
     const updated = findings.filter((_, i) => i !== indexToDelete);
     onAllFindingsUpdate(updated);
-    if (editingState?.index === indexToDelete) {
-      setEditingState(null);
+    if (editingIndex === indexToDelete) {
+      setEditingIndex(null);
+      setEditingText('');
     }
   };
 
