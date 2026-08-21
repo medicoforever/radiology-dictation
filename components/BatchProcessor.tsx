@@ -2238,55 +2238,61 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                     ))}
             </div>
 
-            <div className="mt-6 flex flex-col sm:flex-row gap-4 flex-wrap">
-                <button onClick={addBatch} className="bg-slate-200 text-slate-800 font-bold py-2 px-4 rounded-lg hover:bg-slate-300 w-full sm:w-auto dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600">Add Dictation Batch</button>
+            <div className="mt-6 flex flex-col sm:flex-row gap-3 flex-wrap">
+                <button onClick={addBatch} className="bg-slate-200 text-slate-800 font-bold py-2.5 px-4 rounded-xl hover:bg-slate-300 w-full sm:w-auto dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600 flex items-center justify-center gap-1.5 text-xs sm:text-sm shadow-sm">
+                    <MicIcon className="w-4 h-4 text-blue-600" />
+                    + Add Audio Batch
+                </button>
+                <button onClick={addTextBatch} className="bg-slate-200 text-slate-800 font-bold py-2.5 px-4 rounded-xl hover:bg-slate-300 w-full sm:w-auto dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600 flex items-center justify-center gap-1.5 text-xs sm:text-sm shadow-sm">
+                    <PencilIcon className="w-4 h-4 text-emerald-600" />
+                    + Add Text Notes Batch
+                </button>
                 <button
                     onClick={() => setIsBatchReorderMode(prev => !prev)}
-                    className={`bg-slate-200 text-slate-800 font-bold py-2 px-4 rounded-lg hover:bg-slate-300 w-full sm:w-auto flex items-center justify-center gap-2 transition-colors dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600 ${isBatchReorderMode ? 'bg-blue-100 text-blue-800 ring-2 ring-blue-300 dark:bg-blue-900/50 dark:text-blue-300 dark:ring-blue-500/50' : ''}`}
+                    className={`bg-slate-200 text-slate-800 font-bold py-2.5 px-4 rounded-xl hover:bg-slate-300 w-full sm:w-auto flex items-center justify-center gap-1.5 transition-colors dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600 text-xs sm:text-sm ${isBatchReorderMode ? 'bg-blue-100 text-blue-800 ring-2 ring-blue-300 dark:bg-blue-900/50 dark:text-blue-300 dark:ring-blue-500/50' : ''}`}
                 >
-                    <ReorderIcon className={`w-5 h-5 ${isBatchReorderMode ? 'text-blue-700 dark:text-blue-400' : 'text-slate-500 dark:text-slate-400'}`} />
+                    <ReorderIcon className={`w-4 h-4 ${isBatchReorderMode ? 'text-blue-700 dark:text-blue-400' : 'text-slate-500 dark:text-slate-400'}`} />
                     {isBatchReorderMode ? 'Done Reordering' : 'Reorder Batches'}
                 </button>
                 <button 
                     onClick={handleProcessAll}
                     disabled={!hasProcessableRecordings || !allProcessed || isBusy}
-                    className="bg-green-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-green-700 disabled:bg-green-300 disabled:cursor-not-allowed w-full sm:w-auto flex-grow"
+                    className="bg-green-600 text-white font-bold py-2.5 px-5 rounded-xl hover:bg-green-700 disabled:bg-green-300 disabled:cursor-not-allowed w-full sm:w-auto flex-grow shadow text-xs sm:text-sm flex items-center justify-center gap-2"
                 >
-                    {allProcessed ? 'Create All Transcripts' : <><Spinner className="w-5 h-5 inline mr-2" /> Processing...</>}
+                    {allProcessed ? '🚀 Process All Batches' : <><Spinner className="w-4 h-4 inline mr-1" /> Processing All...</>}
                 </button>
                 {!allProcessed && (
                     <button
                         onClick={handleCancelBatchProcessing}
-                        className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition-colors w-full sm:w-auto"
+                        className="bg-red-600 hover:bg-red-700 text-white font-bold py-2.5 px-4 rounded-xl transition-colors w-full sm:w-auto text-xs sm:text-sm"
                         aria-label="Cancel batch processing"
                     >
                         Cancel Processing
                     </button>
                 )}
 
-                {batches.some(b => b.status === 'error' && !b.findings && b.audioBlobs.length > 0) && (
+                {batches.some(b => b.status === 'error' && !b.findings) && (
                     <button
                         onClick={() => {
-                            const failedBatches = batches.filter(b => b.status === 'error' && !b.findings && b.audioBlobs.length > 0);
+                            const failedBatches = batches.filter(b => b.status === 'error' && !b.findings);
                             failedBatches.forEach(b => handleReprocessBatch(b.id));
                         }}
                         disabled={isBusy}
-                        className="bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 px-4 rounded-lg transition-all shadow flex items-center justify-center gap-1.5 w-full sm:w-auto"
+                        className="bg-amber-600 hover:bg-amber-700 text-white font-bold py-2.5 px-4 rounded-xl transition-all shadow flex items-center justify-center gap-1.5 w-full sm:w-auto text-xs sm:text-sm"
                     >
-                        ↻ Retry All Failed ({batches.filter(b => b.status === 'error' && !b.findings && b.audioBlobs.length > 0).length})
+                        ↻ Retry All Failed ({batches.filter(b => b.status === 'error' && !b.findings).length})
                     </button>
                 )}
 
-                {selectedTemplate && (
-                    <button
-                        onClick={() => handleDownloadDocx()}
-                        disabled={!hasAnyResults}
-                        className="bg-blue-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 disabled:bg-blue-300 disabled:cursor-not-allowed w-full sm:w-auto flex items-center justify-center gap-1.5 shadow"
-                    >
-                        <DownloadIcon className="w-4 h-4" />
-                        Download Merged (.docx)
-                    </button>
-                )}
+                <button
+                    onClick={() => handleDownloadDocx()}
+                    disabled={!hasAnyResults}
+                    className="bg-blue-600 text-white font-bold py-2.5 px-4 rounded-xl hover:bg-blue-700 disabled:bg-blue-300 disabled:cursor-not-allowed w-full sm:w-auto flex items-center justify-center gap-1.5 shadow text-xs sm:text-sm"
+                    title="Download structured Word DOCX for all batches"
+                >
+                    <DownloadIcon className="w-4 h-4" />
+                    Download All DOCX
+                </button>
                 <button
                     onClick={handleDownloadHTML}
                     disabled={!hasAnyResults}
