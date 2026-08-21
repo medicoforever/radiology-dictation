@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
-import { processAudio, createChat, blobToBase64, continueAudioDictation, base64ToBlob, modifyFindingWithAudio, modifyReportWithAudio, identifyPotentialErrors, runComplexImpressionGeneration, transcribeAudioForPrompt } from '../services/geminiService';
+import { processAudio, processTextFindings, createChat, blobToBase64, continueAudioDictation, base64ToBlob, modifyFindingWithAudio, modifyReportWithAudio, modifyReportWithText, identifyPotentialErrors, runComplexImpressionGeneration, transcribeAudioForPrompt } from '../services/geminiService';
 import { saveAudioBlob, getAudioBlob, clearUnusedAudioBlobs } from '../services/audioStorage';
 import Spinner from './ui/Spinner';
 import MicIcon from './icons/MicIcon';
@@ -8,6 +8,7 @@ import StopIcon from './icons/StopIcon';
 import PauseIcon from './icons/PauseIcon';
 import ResumeIcon from './icons/ResumeIcon';
 import UploadIcon from './icons/UploadIcon';
+import SendIcon from './icons/SendIcon';
 import ChevronDownIcon from './icons/ChevronDownIcon';
 import { Chat } from '@google/genai';
 import ChatInterface from './ChatInterface';
@@ -42,6 +43,7 @@ interface Batch {
     id: string;
     name: string;
     audioBlobs: Blob[];
+    inputText?: string;
     status: BatchStatus;
     findings: string[] | null;
     error: string | null;
@@ -163,6 +165,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
     // State for 'Dictate Report Changes' feature
     const [modificationState, setModificationState] = useState<{ batchId: string | null; status: 'idle' | 'recording' | 'processing' }>({ batchId: null, status: 'idle' });
     const [modificationError, setModificationError] = useState<{ batchId: string | null; message: string | null }>({ batchId: null, message: null });
+    const [batchModificationTexts, setBatchModificationTexts] = useState<Record<string, string>>({});
     const modificationRecorder = useAudioRecorder();
 
     // State for reordering entire batches
@@ -513,6 +516,50 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
         };
         setBatches(prev => [...prev, newBatch]);
     };
+
+    const addTextBatch = () => {
+        const newBatch: Batch = {
+            id: crypto.randomUUID(),
+            name: `Text Dictation #${batches.length + 1}`,
+            audioBlobs: [],
+            inputText: '',
+            findings: null,
+            status: 'idle',
+            isChatting: false,
+            selectedModel: selectedModel,
+            customPrompt: globalCustomPrompt,
+            customImages: [...globalCustomImages],
+        };
+        setBatches(prev => [...prev, newBatch]);
+    };
+
+    const handleApplyBatchTextModification = async (batchId: string) => {
+        const text = batchModificationTexts[batchId]?.trim();
+        if (!text) return;
+        const batch = batches.find(b => b.id === batchId);
+        if (!batch || !batch.findings) return;
+
+        setUndoStates(prev => ({ ...prev, [batchId]: [...batch.findings!] }));
+        setModificationState({ batchId, status: 'processing' });
+        setModificationError({ batchId: null, message: null });
+
+        try {
+            const newFindings = await modifyReportWithText(
+                batch.findings,
+                text,
+                batch.selectedModel,
+                batch.customPrompt,
+                batch.customImages
+            );
+            setBatches(prev => prev.map(b => b.id === batchId ? { ...b, findings: newFindings } : b));
+            setBatchModificationTexts(prev => ({ ...prev, [batchId]: '' }));
+            setModificationState({ batchId: null, status: 'idle' });
+        } catch (err: any) {
+            const message = err instanceof Error ? err.message : 'An unknown error occurred.';
+            setModificationError({ batchId, message });
+            setModificationState({ batchId: null, status: 'idle' });
+        }
+    };
     
     const removeBatch = (id: string) => {
         if (isMainRecording) {
@@ -844,29 +891,44 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
     };
 
     const handleProcessAll = async () => {
-        const batchesToProcess = batches.filter(b => (b.status === 'complete' || b.status === 'paused' || b.status === 'error' || b.status === 'idle') && b.audioBlobs.length > 0 && !b.findings);
+        const batchesToProcess = batches.filter(b => 
+            (b.status === 'complete' || b.status === 'paused' || b.status === 'error' || b.status === 'idle') && 
+            (b.audioBlobs.length > 0 || (b.inputText && b.inputText.trim())) && 
+            !b.findings
+        );
         if (batchesToProcess.length === 0) return;
 
         isBatchCancelledRef.current = false;
         setBatches(prev => prev.map(b => batchesToProcess.find(p => p.id === b.id) ? {...b, status: 'processing'} : b));
 
         await Promise.all(batchesToProcess.map(async (batch) => {
-            if (batch.audioBlobs.length === 0 || isBatchCancelledRef.current) return;
+            if ((batch.audioBlobs.length === 0 && (!batch.inputText || !batch.inputText.trim())) || isBatchCancelledRef.current) return;
             try {
-                const mimeType = batch.audioBlobs[0].type;
-                const mergedBlob = new Blob(batch.audioBlobs, { type: mimeType });
-                const findings = await processAudio(mergedBlob, batch.selectedModel, batch.customPrompt, batch.customImages);
+                let findings: string[] = [];
+                let chatSession: any = null;
+
+                if (batch.audioBlobs.length > 0) {
+                    const mimeType = batch.audioBlobs[0].type;
+                    const mergedBlob = new Blob(batch.audioBlobs, { type: mimeType });
+                    findings = await processAudio(mergedBlob, batch.selectedModel, batch.customPrompt, batch.customImages);
+                    if (isBatchCancelledRef.current) return;
+                    chatSession = await createChat(mergedBlob, findings, batch.customPrompt, batch.customImages);
+                } else if (batch.inputText && batch.inputText.trim()) {
+                    findings = await processTextFindings(batch.inputText.trim(), batch.selectedModel, batch.customPrompt, batch.customImages, selectedTemplate);
+                    if (isBatchCancelledRef.current) return;
+                    const textBlob = new Blob([batch.inputText.trim()], { type: 'text/plain' });
+                    (textBlob as any).name = 'batch_dictation.txt';
+                    chatSession = await createChat(textBlob, findings, batch.customPrompt, batch.customImages);
+                }
+
                 if (isBatchCancelledRef.current) return;
-                
-                const chatSession = await createChat(mergedBlob, findings, batch.customPrompt, batch.customImages);
-                if (isBatchCancelledRef.current) return;
-                const aiGreeting = "I have reviewed the audio and transcript for this dictation. How can I help you further?";
+                const aiGreeting = "I have reviewed the dictation and transcript. How can I help you further?";
                 const initialChatHistory = [{ author: 'AI' as const, text: `${findings.join('\n\n')}\n\n${aiGreeting}` }];
 
                 setBatches(prev => prev.map(b => b.id === batch.id ? { ...b, status: 'complete', findings, chat: chatSession, chatHistory: initialChatHistory, isChatting: false } : b));
             } catch (err) {
                 if (isBatchCancelledRef.current) return;
-                 const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
+                const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
                 setBatches(prev => prev.map(b => b.id === batch.id ? { ...b, status: 'error', error: errorMessage } : b));
             }
         }));
@@ -874,7 +936,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
     
     const handleReprocessBatch = async (batchId: string) => {
         const batch = batches.find(b => b.id === batchId);
-        if (!batch || batch.audioBlobs.length === 0) return;
+        if (!batch || (batch.audioBlobs.length === 0 && (!batch.inputText || !batch.inputText.trim()))) return;
 
         if (batch && batch.findings) {
             setUndoStates(prev => ({ ...prev, [batchId]: [...batch.findings!] }));
@@ -884,14 +946,25 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
         setBatches(prev => prev.map(b => b.id === batchId ? {...b, status: 'processing', error: undefined } : b));
 
         try {
-            const mimeType = batch.audioBlobs[0].type;
-            const mergedBlob = new Blob(batch.audioBlobs, { type: mimeType });
-            const findings = await processAudio(mergedBlob, batch.selectedModel, batch.customPrompt, batch.customImages);
+            let findings: string[] = [];
+            let chatSession: any = null;
+
+            if (batch.audioBlobs.length > 0) {
+                const mimeType = batch.audioBlobs[0].type;
+                const mergedBlob = new Blob(batch.audioBlobs, { type: mimeType });
+                findings = await processAudio(mergedBlob, batch.selectedModel, batch.customPrompt, batch.customImages);
+                if (isBatchCancelledRef.current) return;
+                chatSession = await createChat(mergedBlob, findings, batch.customPrompt, batch.customImages);
+            } else if (batch.inputText && batch.inputText.trim()) {
+                findings = await processTextFindings(batch.inputText.trim(), batch.selectedModel, batch.customPrompt, batch.customImages, selectedTemplate);
+                if (isBatchCancelledRef.current) return;
+                const textBlob = new Blob([batch.inputText.trim()], { type: 'text/plain' });
+                (textBlob as any).name = 'batch_dictation.txt';
+                chatSession = await createChat(textBlob, findings, batch.customPrompt, batch.customImages);
+            }
+
             if (isBatchCancelledRef.current) return;
-            
-            const chatSession = await createChat(mergedBlob, findings, batch.customPrompt, batch.customImages);
-            if (isBatchCancelledRef.current) return;
-            const aiGreeting = "I have reviewed the audio and transcript for this dictation. How can I help you further?";
+            const aiGreeting = "I have reviewed the dictation and transcript. How can I help you further?";
             const initialChatHistory = [{ author: 'AI' as const, text: `${findings.join('\n\n')}\n\n${aiGreeting}` }];
 
             setBatches(prev => prev.map(b => b.id === batchId ? { ...b, status: 'complete', findings, chat: chatSession, chatHistory: initialChatHistory, isChatting: false } : b));
@@ -2560,43 +2633,77 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                                                             </div>
                                                         )
                                                     })}
-                                                </div>
+                                                    <div className="mt-6 p-4 border rounded-xl bg-slate-50 dark:bg-slate-800/80 dark:border-slate-700 shadow-sm space-y-3">
+                                                     <div className="flex items-start sm:items-center gap-3 flex-col sm:flex-row">
+                                                         <MicScribbleIcon className="w-8 h-8 text-blue-600 dark:text-blue-400 flex-shrink-0" />
+                                                         <div className="flex-grow">
+                                                             <h4 className="font-bold text-slate-800 dark:text-slate-100">Dictate or Type Report Changes</h4>
+                                                             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+                                                                 Dictate with voice or type instructions to modify this report (e.g. <em>'remove measurements'</em>, <em>'make impression concise'</em>).
+                                                             </p>
+                                                         </div>
+                                                         <div className="sm:ml-4 flex-shrink-0 w-full sm:w-auto flex items-center gap-2">
+                                                             {modificationState.status === 'idle' || modificationState.batchId !== batch.id ? (
+                                                                 <button 
+                                                                     onClick={() => handleStartModification(batch.id)} 
+                                                                     className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-xl shadow-sm text-xs sm:text-sm flex items-center gap-1.5 transition-all"
+                                                                 >
+                                                                     <MicIcon className="w-4 h-4" />
+                                                                     <span>Start Dictating Changes</span>
+                                                                 </button>
+                                                             ) : modificationState.status === 'recording' ? (
+                                                                 <div className="flex items-center justify-center gap-3 bg-red-100 dark:bg-red-900/30 px-3 py-1.5 rounded-xl border border-red-200 dark:border-red-800">
+                                                                     <div className="flex items-center gap-1.5">
+                                                                         <div className="w-2.5 h-2.5 bg-red-500 rounded-full animate-ping"></div>
+                                                                         <span className="font-bold text-xs text-red-700 dark:text-red-300">Listening...</span>
+                                                                     </div>
+                                                                     <button onClick={handleStopModification} className="flex items-center gap-1 bg-red-600 text-white font-bold py-1 px-3 rounded-lg text-xs hover:bg-red-700 transition-colors">
+                                                                         <StopIcon className="w-3.5 h-3.5"/>
+                                                                         Stop & Apply
+                                                                     </button>
+                                                                 </div>
+                                                             ) : modificationState.status === 'processing' ? (
+                                                                 <div className="flex items-center gap-2 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-3 py-1.5 rounded-xl text-xs font-semibold">
+                                                                     <Spinner className="w-4 h-4"/>
+                                                                     <span>Applying Changes...</span>
+                                                                 </div>
+                                                             ) : null}
+                                                         </div>
+                                                     </div>
 
-                                                <div className="mt-6 p-4 border rounded-lg bg-slate-50 dark:bg-slate-700/50 dark:border-slate-700">
-                                                    <div className="flex items-start sm:items-center gap-3 flex-col sm:flex-row">
-                                                        <MicScribbleIcon className="w-8 h-8 text-slate-600 dark:text-slate-300 flex-shrink-0" />
-                                                        <div className="flex-grow">
-                                                            <h4 className="font-semibold text-slate-800 dark:text-slate-200">Dictate Report Changes</h4>
-                                                            <p className="text-sm text-slate-600 dark:text-slate-400">
-                                                                Use this to dictate global changes to the entire report, like 'remove all measurements' or 'rephrase the conclusion to be more concise'.
-                                                            </p>
-                                                        </div>
-                                                        <div className="sm:ml-4 flex-shrink-0 w-full sm:w-auto">
-                                                            {modificationState.status === 'idle' || modificationState.batchId !== batch.id ? (
-                                                                <button onClick={() => handleStartModification(batch.id)} className="w-full bg-blue-100 text-blue-800 font-bold py-2 px-4 rounded-lg hover:bg-blue-200 dark:bg-blue-900/50 dark:text-blue-300 dark:hover:bg-blue-900/80 transition-colors">
-                                                                    Start Dictating Changes
-                                                                </button>
-                                                            ) : modificationState.status === 'recording' ? (
-                                                                <div className="w-full flex items-center justify-center gap-4 bg-red-100 dark:bg-red-900/20 p-2 rounded-lg">
-                                                                    <div className="flex items-center gap-2">
-                                                                        <div className="w-3 h-3 bg-red-500 rounded-full animate-ping"></div>
-                                                                        <span className="font-semibold text-red-700 dark:text-red-300">Recording...</span>
-                                                                    </div>
-                                                                    <button onClick={handleStopModification} className="flex items-center justify-center gap-1 bg-red-600 text-white font-bold py-1 px-3 rounded-lg hover:bg-red-700">
-                                                                        <StopIcon className="w-5 h-5"/>
-                                                                        Stop
-                                                                    </button>
-                                                                </div>
-                                                            ) : modificationState.status === 'processing' ? (
-                                                                <div className="w-full flex items-center justify-center gap-2 bg-slate-100 dark:bg-slate-700 p-2 rounded-lg">
-                                                                    <Spinner className="w-6 h-6"/>
-                                                                    <span className="font-semibold text-slate-700 dark:text-slate-300">Applying Changes...</span>
-                                                                </div>
-                                                            ) : null}
-                                                        </div>
-                                                    </div>
-                                                    {modificationError.batchId === batch.id && modificationError.message && <p className="text-red-500 dark:text-red-400 text-sm mt-2">{modificationError.message}</p>}
-                                                </div>
+                                                     {/* Typed Instruction Input */}
+                                                     <div className="pt-2 border-t border-slate-200 dark:border-slate-700/60 flex items-center gap-2">
+                                                         <input
+                                                             type="text"
+                                                             value={batchModificationTexts[batch.id] || ''}
+                                                             onChange={(e) => setBatchModificationTexts(prev => ({ ...prev, [batch.id]: e.target.value }))}
+                                                             onKeyDown={(e) => {
+                                                                 if (e.key === 'Enter' && batchModificationTexts[batch.id]?.trim() && modificationState.status !== 'processing') {
+                                                                     e.preventDefault();
+                                                                     handleApplyBatchTextModification(batch.id);
+                                                                 }
+                                                             }}
+                                                             placeholder="Or type change instructions for this report (e.g. 'remove measurements', 'make impression bulleted')..."
+                                                             disabled={modificationState.status === 'processing' && modificationState.batchId === batch.id}
+                                                             className="flex-1 p-2.5 text-xs sm:text-sm border border-slate-300 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                                         />
+                                                         <button
+                                                             onClick={() => handleApplyBatchTextModification(batch.id)}
+                                                             disabled={!batchModificationTexts[batch.id]?.trim() || (modificationState.status === 'processing' && modificationState.batchId === batch.id)}
+                                                             className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-xs sm:text-sm font-bold shadow transition-all flex items-center gap-1.5 flex-shrink-0"
+                                                             title="Apply typed changes"
+                                                         >
+                                                             {modificationState.status === 'processing' && modificationState.batchId === batch.id ? (
+                                                                 <Spinner className="w-4 h-4" />
+                                                             ) : (
+                                                                 <SendIcon className="w-4 h-4" />
+                                                             )}
+                                                             <span>Send</span>
+                                                         </button>
+                                                     </div>
+
+                                                     {modificationError.batchId === batch.id && modificationError.message && <p className="text-red-500 dark:text-red-400 text-xs mt-1 font-semibold">{modificationError.message}</p>}
+                                                 </div>                </div>
                                                 
                                                 {/* Complex Impression Generator Section */}
                                                 {complexGeneratorVisibleForBatchId === batch.id ? (
@@ -2688,16 +2795,14 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                                                                     Download Expert Notes
                                                                 </button>
                                                             )}
-                                                            {selectedTemplate && (
-                                                                <button
-                                                                    onClick={() => handleDownloadDocx(batch.id)}
-                                                                    disabled={!batch.findings || batch.findings.length === 0}
-                                                                    className="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition-colors w-full sm:w-auto flex items-center justify-center gap-2 shadow"
-                                                                >
-                                                                    <DownloadIcon className="w-5 h-5" />
-                                                                    Download Merged (.docx)
-                                                                </button>
-                                                            )}
+                                                            <button
+                                                                onClick={() => handleDownloadDocx(batch.id)}
+                                                                disabled={!batch.findings || batch.findings.length === 0}
+                                                                className="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition-colors w-full sm:w-auto flex items-center justify-center gap-2 shadow"
+                                                            >
+                                                                <DownloadIcon className="w-5 h-5" />
+                                                                Download DOCX
+                                                            </button>
                                                             <button
                                                                 onClick={() => handleDownload(batch)}
                                                                 disabled={!batch.audioBlobs.length}

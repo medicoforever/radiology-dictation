@@ -8,6 +8,7 @@ import { Chat } from '@google/genai';
 import { saveAudioBlob, getAudioBlob, deleteAudioBlob } from './services/audioStorage';
 import { BatchProcessor } from './components/BatchProcessor';
 import LiveDictation from './components/LiveDictation';
+import MergeTemplateProcessor from './components/MergeTemplateProcessor';
 import WaveformIcon from './components/icons/WaveformIcon';
 import SunIcon from './components/icons/SunIcon';
 import MoonIcon from './components/icons/MoonIcon';
@@ -38,7 +39,7 @@ const getCleanMimeType = (blob: Blob): string => {
 };
 
 const App: React.FC = () => {
-  const [mode, setMode] = useState<'single' | 'batch' | 'live'>('single');
+  const [mode, setMode] = useState<'single' | 'batch' | 'live' | 'merge_template'>('single');
   const [status, setStatus] = useState<AppStatus>(AppStatus.Idle);
   const [findings, setFindings] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -252,17 +253,15 @@ const App: React.FC = () => {
       if (isCancelledRef.current) return;
       setFindings(processedText);
 
-      // DOCX merge & auto-download ONLY if template is selected
+      // DOCX merge & auto-download if template is selected
       if (selectedTemplate && autoDownloadDocx && processedText.length > 0) {
         try {
           const docxBase64 = selectedTemplate.docxBase64;
-          if (docxBase64) {
-            const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
-            const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-            const blob = await mergeFindingsIntoDocx(docxBase64, processedText, title);
-            if (!isCancelledRef.current) {
-              downloadDocxBlob(blob, cleanFileName);
-            }
+          const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
+          const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
+          const blob = await mergeFindingsIntoDocx(docxBase64, processedText, title);
+          if (!isCancelledRef.current) {
+            downloadDocxBlob(blob, cleanFileName);
           }
         } catch (docErr) {
           console.warn('Auto DOCX download error:', docErr);
@@ -296,16 +295,14 @@ const App: React.FC = () => {
         const processedText = transcript.split('\n').filter(line => line.trim() !== '');
         setFindings(processedText);
 
-        // DOCX merge & auto-download ONLY if template is selected
+        // DOCX merge & auto-download if template is selected
         if (selectedTemplate && autoDownloadDocx && processedText.length > 0) {
           try {
             const docxBase64 = selectedTemplate.docxBase64;
-            if (docxBase64) {
-              const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
-              const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-              const blob = await mergeFindingsIntoDocx(docxBase64, processedText, title);
-              downloadDocxBlob(blob, cleanFileName);
-            }
+            const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
+            const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
+            const blob = await mergeFindingsIntoDocx(docxBase64, processedText, title);
+            downloadDocxBlob(blob, cleanFileName);
           } catch (docErr) {
             console.warn('Auto DOCX download error:', docErr);
           }
@@ -515,17 +512,23 @@ const App: React.FC = () => {
       case AppStatus.Recording:
         return (
           <>
-            <div className="flex justify-end items-center gap-4 mb-4 -mt-4">
+            <div className="flex justify-end items-center gap-3 mb-4 -mt-4 flex-wrap">
+                 <button 
+                    onClick={() => setMode('merge_template')} 
+                    className="flex items-center gap-1.5 text-xs sm:text-sm font-bold text-teal-600 hover:text-teal-800 dark:text-teal-400 dark:hover:text-teal-300 transition-colors bg-teal-50 dark:bg-teal-950/40 px-3 py-1.5 rounded-xl border border-teal-200 dark:border-teal-850"
+                >
+                    📑 Merge Findings to Template
+                </button>
                  <button 
                     onClick={() => setMode('live')} 
-                    className="flex items-center gap-1.5 text-sm font-semibold text-green-600 hover:text-green-800 dark:text-green-400 dark:hover:text-green-300 transition-colors"
+                    className="flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-green-600 hover:text-green-800 dark:text-green-400 dark:hover:text-green-300 transition-colors"
                 >
                     <WaveformIcon className="w-4 h-4" />
                     Live Dictation
                 </button>
                  <button 
                     onClick={() => setMode('batch')} 
-                    className="text-sm font-semibold text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 transition-colors"
+                    className="text-xs sm:text-sm font-semibold text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 transition-colors"
                 >
                     Batch Processing &rarr;
                 </button>
@@ -699,6 +702,14 @@ const App: React.FC = () => {
     switch (mode) {
       case 'single':
         return renderSingleModeContent();
+      case 'merge_template':
+        return (
+          <MergeTemplateProcessor
+            selectedModel={selectedModel}
+            initialTemplate={selectedTemplate}
+            onBack={() => setMode('single')}
+          />
+        );
       case 'batch':
         return <BatchProcessor 
                     selectedModel={selectedModel} 
