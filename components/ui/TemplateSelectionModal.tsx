@@ -7,6 +7,7 @@ import Spinner from './Spinner';
 import {
   RADIOLOGY_TEMPLATES_CATALOG,
   RadiologyDocxTemplate,
+  initializeTemplateCatalog,
 } from '../../services/templateCatalog';
 import { saveUserTemplate, UserTemplate } from '../../services/templateStorage';
 import { extractLinesFromDocxBlob } from '../../services/docxService';
@@ -51,6 +52,7 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<string>('ALL');
+  const [catalogList, setCatalogList] = useState<RadiologyDocxTemplate[]>(RADIOLOGY_TEMPLATES_CATALOG);
   const [previewTemplate, setPreviewTemplate] = useState<SelectedTemplateData | null>(null);
 
   const [isUploading, setIsUploading] = useState(false);
@@ -59,26 +61,36 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    initializeTemplateCatalog().then(data => {
+      if (Array.isArray(data) && data.length > 0) {
+        setCatalogList([...data]);
+      }
+    }).catch(() => {});
+  }, [isOpen]);
+
+  useEffect(() => {
     if (!isOpen) {
       setSearchQuery('');
       setUploadError(null);
       setUploadSuccess(null);
     } else {
+      const source = catalogList.length > 0 ? catalogList : RADIOLOGY_TEMPLATES_CATALOG;
       if (selectedTemplateId) {
-        const found = RADIOLOGY_TEMPLATES_CATALOG.find(t => t.id === selectedTemplateId);
+        const found = source.find(t => t.id === selectedTemplateId);
         if (found) {
           setPreviewTemplate(found);
           return;
         }
       }
-      if (RADIOLOGY_TEMPLATES_CATALOG.length > 0) {
-        setPreviewTemplate(RADIOLOGY_TEMPLATES_CATALOG[0]);
+      if (source.length > 0) {
+        setPreviewTemplate(source[0]);
       }
     }
-  }, [isOpen, selectedTemplateId]);
+  }, [isOpen, selectedTemplateId, catalogList]);
 
   const allTemplatesList: SelectedTemplateData[] = useMemo(() => {
-    const list: SelectedTemplateData[] = RADIOLOGY_TEMPLATES_CATALOG.map(t => ({
+    const source = catalogList.length > 0 ? catalogList : RADIOLOGY_TEMPLATES_CATALOG;
+    const list: SelectedTemplateData[] = source.map(t => ({
       id: t.id,
       name: t.name,
       category: t.category,

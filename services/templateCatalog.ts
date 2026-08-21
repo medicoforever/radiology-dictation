@@ -14,7 +14,7 @@ export interface RadiologyDocxTemplate {
   relPath?: string;
 }
 
-export const RADIOLOGY_TEMPLATES_CATALOG: RadiologyDocxTemplate[] = rawTemplatesData as RadiologyDocxTemplate[];
+export let RADIOLOGY_TEMPLATES_CATALOG: RadiologyDocxTemplate[] = (rawTemplatesData as RadiologyDocxTemplate[]) || [];
 
 export const TEMPLATE_MODALITIES = [
   'ALL',
@@ -24,6 +24,49 @@ export const TEMPLATE_MODALITIES = [
 ] as const;
 
 export type TemplateModalityFilter = typeof TEMPLATE_MODALITIES[number];
+
+/**
+ * Hydrate catalog from public static asset or GitHub raw if local json was truncated by an AI editor
+ */
+export async function initializeTemplateCatalog(): Promise<RadiologyDocxTemplate[]> {
+  if (Array.isArray(RADIOLOGY_TEMPLATES_CATALOG) && RADIOLOGY_TEMPLATES_CATALOG.length >= 100) {
+    return RADIOLOGY_TEMPLATES_CATALOG;
+  }
+  
+  // 1. Try public static asset
+  try {
+    const res = await fetch('/templatesData.json');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data) && data.length >= 100) {
+        RADIOLOGY_TEMPLATES_CATALOG = data;
+        return data;
+      }
+    }
+  } catch (e) {
+    console.warn('Local public template fetch failed, checking remote backup...', e);
+  }
+
+  // 2. Try GitHub raw remote backup
+  try {
+    const ghRes = await fetch('https://raw.githubusercontent.com/medicoforever/radiology-dictation/main/public/templatesData.json');
+    if (ghRes.ok) {
+      const ghData = await ghRes.json();
+      if (Array.isArray(ghData) && ghData.length >= 100) {
+        RADIOLOGY_TEMPLATES_CATALOG = ghData;
+        return ghData;
+      }
+    }
+  } catch (err) {
+    console.warn('Remote template backup fetch failed:', err);
+  }
+
+  return RADIOLOGY_TEMPLATES_CATALOG;
+}
+
+if (typeof window !== 'undefined') {
+  initializeTemplateCatalog().catch(() => {});
+}
 
 /**
  * Filter templates by modality or search query
@@ -42,8 +85,6 @@ export function filterTemplates(
     return list;
   }
 
-
-
   const q = query.toLowerCase().trim();
   return list.filter(t => 
     t.name.toLowerCase().includes(q) ||
@@ -60,6 +101,7 @@ export function getTemplateById(id: string): RadiologyDocxTemplate | undefined {
 
 export default {
   RADIOLOGY_TEMPLATES_CATALOG,
+  initializeTemplateCatalog,
   filterTemplates,
   getTemplateById,
 };
