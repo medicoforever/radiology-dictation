@@ -17,6 +17,7 @@ type AudioRecorderResult = {
   resumeRecording: () => void;
   error: string | null;
   unsavedSession: UnsavedSession | null;
+  getUnsavedSessionBlob: () => Blob | null;
   recoverUnsavedSession: () => Promise<Blob | null>;
   discardUnsavedSession: () => Promise<void>;
 };

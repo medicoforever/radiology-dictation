@@ -12,6 +12,8 @@ import MergeTemplateProcessor from './components/MergeTemplateProcessor';
 import WaveformIcon from './components/icons/WaveformIcon';
 import SunIcon from './components/icons/SunIcon';
 import MoonIcon from './components/icons/MoonIcon';
+import DownloadIcon from './components/icons/DownloadIcon';
+import UploadIcon from './components/icons/UploadIcon';
 import CustomPromptInput from './components/ui/CustomPromptInput';
 import TemplateSelectorBanner from './components/ui/TemplateSelectorBanner';
 import TemplateSelectionModal, { SelectedTemplateData } from './components/ui/TemplateSelectionModal';

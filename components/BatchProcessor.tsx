@@ -46,9 +46,9 @@ interface Batch {
     inputText?: string;
     status: BatchStatus;
     findings: string[] | null;
-    error: string | null;
-    chat: Chat | null;
-    chatHistory: ChatMessage[];
+    error?: string | null;
+    chat?: Chat | null;
+    chatHistory?: ChatMessage[];
     selectedModel: string;
     customPrompt?: string;
     customImages?: Array<{ data: string; mimeType: string }>;
@@ -740,7 +740,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
     };
 
     const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-        const files = Array.from(event.target.files || []);
+        const files = Array.from(event.target.files || []) as File[];
         if (files.length > 0) {
             if (uploadTargetBatchId) {
                 const file = files[0];
@@ -803,7 +803,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
             generalDragCounter.current = 0;
             setIsGeneralDragging(false);
 
-            const files = Array.from(e.dataTransfer.files).filter(f => 
+            const files = (Array.from(e.dataTransfer.files) as File[]).filter(f => 
                 f.type.startsWith('audio/') || f.name.match(/\.(mp3|wav|m4a|ogg|webm|aac|flac)$/i)
             );
 
@@ -845,7 +845,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
             e.stopPropagation();
             setDragOverCardId(null);
 
-            const files = Array.from(e.dataTransfer.files).filter(f => 
+            const files = (Array.from(e.dataTransfer.files) as File[]).filter(f => 
                 f.type.startsWith('audio/') || f.name.match(/\.(mp3|wav|m4a|ogg|webm|aac|flac)$/i)
             );
 
