@@ -19,8 +19,7 @@ export let RADIOLOGY_TEMPLATES_CATALOG: RadiologyDocxTemplate[] = (rawTemplatesD
 export const TEMPLATE_MODALITIES = [
   'ALL',
   'CT',
-  'MRI A',
-  'MRI B',
+  'MRI',
 ] as const;
 
 export type TemplateModalityFilter = typeof TEMPLATE_MODALITIES[number];
@@ -29,7 +28,7 @@ export type TemplateModalityFilter = typeof TEMPLATE_MODALITIES[number];
  * Hydrate catalog from public static asset or GitHub raw if local json was truncated by an AI editor
  */
 export async function initializeTemplateCatalog(): Promise<RadiologyDocxTemplate[]> {
-  if (Array.isArray(RADIOLOGY_TEMPLATES_CATALOG) && RADIOLOGY_TEMPLATES_CATALOG.length >= 100) {
+  if (Array.isArray(RADIOLOGY_TEMPLATES_CATALOG) && RADIOLOGY_TEMPLATES_CATALOG.length >= 50) {
     return RADIOLOGY_TEMPLATES_CATALOG;
   }
   
@@ -38,7 +37,7 @@ export async function initializeTemplateCatalog(): Promise<RadiologyDocxTemplate
     const res = await fetch('/templatesData.json');
     if (res.ok) {
       const data = await res.json();
-      if (Array.isArray(data) && data.length >= 100) {
+      if (Array.isArray(data) && data.length >= 50) {
         RADIOLOGY_TEMPLATES_CATALOG = data;
         return data;
       }
@@ -52,7 +51,7 @@ export async function initializeTemplateCatalog(): Promise<RadiologyDocxTemplate
     const ghRes = await fetch('https://raw.githubusercontent.com/medicoforever/radiology-dictation/main/public/templatesData.json');
     if (ghRes.ok) {
       const ghData = await ghRes.json();
-      if (Array.isArray(ghData) && ghData.length >= 100) {
+      if (Array.isArray(ghData) && ghData.length >= 50) {
         RADIOLOGY_TEMPLATES_CATALOG = ghData;
         return ghData;
       }
