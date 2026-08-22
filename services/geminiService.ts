@@ -145,8 +145,8 @@ export const processAudio = async (
 
   // 2-STEP PIPELINE: When a template is selected for audio dictation
   if (selectedTemplate && selectedTemplate.lines && selectedTemplate.lines.length > 0 && !isReprocessing) {
-    // Step 1: Transcribe audio to verbatim clinical text
-    const transcribedText = await transcribeAudioForPrompt(audioBlob);
+    // Step 1: Transcribe audio to verbatim clinical text using user-selected model
+    const transcribedText = await transcribeAudioForPrompt(audioBlob, model);
     if (!transcribedText || !transcribedText.trim()) {
       return selectedTemplate.lines;
     }
@@ -699,7 +699,7 @@ export const processTextFindings = async (
   return processAudio(baseBlob, model, customPrompt, customImages, undefined, selectedTemplate);
 };
 
-export const transcribeAudioForPrompt = async (audioBlob: Blob): Promise<string> => {
+export const transcribeAudioForPrompt = async (audioBlob: Blob, model = 'gemini-2.5-flash'): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   const prompt = `You are an expert medical transcriptionist specializing in radiology dictation.
@@ -718,7 +718,7 @@ Transcribe the following radiology dictation audio with 100% precision.
   
   try {
     const response: GenerateContentResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: model,
       contents: { parts: [textPart, audioPart] },
     });
 
