@@ -29,6 +29,7 @@ import WarningIcon from './icons/WarningIcon';
 import BrainIcon from './icons/BrainIcon';
 import { mergeFindingsIntoDocx, downloadDocxBlob } from '../services/docxService';
 import { RADIOLOGY_TEMPLATES_CATALOG } from '../services/templateCatalog';
+import { isTemplateSkillEnabled, getTemplateCustomPrompt } from '../services/templateStorage';
 import { SelectedTemplateData } from './ui/TemplateSelectionModal';
 
 
