@@ -111,6 +111,18 @@ const getCleanMimeType = (blob: Blob): string => {
 
 const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, isErrorCheckEnabled, selectedTemplate = null, autoDownloadDocx = true }) => {
     const [batches, setBatches] = useState<Batch[]>([]);
+    // Sync active model selection from top header to batches when changed
+    useEffect(() => {
+        if (selectedModel) {
+            setBatches(prev => prev.map(b => {
+                if (b.status === 'error' || b.status === 'idle' || !b.findings) {
+                    return { ...b, selectedModel };
+                }
+                return b;
+            }));
+        }
+    }, [selectedModel]);
+
     const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
     const {
         isRecording: isMainRecording,
