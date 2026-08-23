@@ -543,6 +543,7 @@ const App: React.FC = () => {
               onClearTemplate={() => setSelectedTemplate(null)}
               autoDownloadDocx={autoDownloadDocx}
               onToggleAutoDownload={setAutoDownloadDocx}
+              onSelectTemplate={setSelectedTemplate}
               className="mb-4"
             />
 
