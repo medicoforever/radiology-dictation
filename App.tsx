@@ -549,9 +549,7 @@ const App: React.FC = () => {
              <CustomPromptInput
                 prompt={customPrompt}
                 onPromptChange={setCustomPrompt}
-                images={customImages}
-                onImagesChange={setCustomImages}
-                className="mb-6"
+                                className="mb-6"
             />
             <AudioRecorder
               status={status}
