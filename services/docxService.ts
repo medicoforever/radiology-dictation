@@ -644,12 +644,23 @@ export async function extractTextFromDocxBlob(blob: Blob): Promise<string> {
   }
 }
 
-export async function extractLinesFromDocxBlob(blob: Blob): Promise<string[]> {
+export async function extractLinesFromDocxBlob(blob: Blob): Promise<{ lines: string[]; docxBase64: string }> {
   try {
     const arrayBuffer = await blob.arrayBuffer();
+
+    // Convert ArrayBuffer to base64
+    let binary = '';
+    const bytes = new Uint8Array(arrayBuffer);
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+      binary += String.fromCharCode.apply(null, chunk as any);
+    }
+    const docxBase64 = btoa(binary);
+
     const entries = await parseZip(arrayBuffer);
     const docEntry = entries.get('word/document.xml');
-    if (!docEntry) return [];
+    if (!docEntry) return { lines: [], docxBase64 };
     const xmlStr = new TextDecoder('utf-8').decode(docEntry.data);
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlStr, 'application/xml');
@@ -663,9 +674,9 @@ export async function extractLinesFromDocxBlob(blob: Blob): Promise<string[]> {
       }
       if (line.trim()) lines.push(line.trim());
     }
-    return lines;
+    return { lines, docxBase64 };
   } catch (e) {
     console.warn('extractLinesFromDocxBlob error:', e);
-    return [];
+    return { lines: [], docxBase64: '' };
   }
 }

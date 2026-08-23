@@ -1035,6 +1035,7 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                 className="bg-white border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 w-full dark:bg-slate-700 dark:border-slate-600 dark:text-white"
                 aria-label="Select AI model for reprocessing"
             >
+                <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro</option>
                 <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
                 <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                 <option value="gemini-3-flash-preview">Gemini 3 Flash</option>

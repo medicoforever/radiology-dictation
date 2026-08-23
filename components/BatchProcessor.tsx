@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
-import { processAudio, processAudioWithDocx, processTextFindings, createChat, blobToBase64, continueAudioDictation, base64ToBlob, modifyFindingWithAudio, modifyReportWithAudio, modifyReportWithText, identifyPotentialErrors, runComplexImpressionGeneration, transcribeAudioForPrompt } from '../services/geminiService';
+import { processAudio, processAudioWithDocx, processTextFindings, mergeFindingsWithAst, createChat, blobToBase64, continueAudioDictation, base64ToBlob, modifyFindingWithAudio, modifyReportWithAudio, modifyReportWithText, identifyPotentialErrors, runComplexImpressionGeneration, transcribeAudioForPrompt } from '../services/geminiService';
 import { saveAudioBlob, getAudioBlob, clearUnusedAudioBlobs } from '../services/audioStorage';
 import Spinner from './ui/Spinner';
 import MicIcon from './icons/MicIcon';
@@ -928,7 +928,8 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                     if (isBatchCancelledRef.current) return;
                     chatSession = await createChat(mergedBlob, findings, batch.customPrompt, batch.customImages);
                 } else if (batch.inputText && batch.inputText.trim()) {
-                    findings = await processTextFindings(batch.inputText.trim(), batch.selectedModel, batch.customPrompt, batch.customImages, selectedTemplate);
+                    const textRes = await processTextFindings(batch.inputText.trim(), batch.selectedModel, batch.customPrompt, batch.customImages, selectedTemplate);
+                    findings = textRes.findings;
                     if (isBatchCancelledRef.current) return;
                     const textBlob = new Blob([batch.inputText.trim()], { type: 'text/plain' });
                     (textBlob as any).name = 'batch_dictation.txt';
@@ -970,7 +971,8 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                 if (isBatchCancelledRef.current) return;
                 chatSession = await createChat(mergedBlob, findings, batch.customPrompt, batch.customImages);
             } else if (batch.inputText && batch.inputText.trim()) {
-                findings = await processTextFindings(batch.inputText.trim(), batch.selectedModel, batch.customPrompt, batch.customImages, selectedTemplate);
+                const textRes = await processTextFindings(batch.inputText.trim(), batch.selectedModel, batch.customPrompt, batch.customImages, selectedTemplate);
+                findings = textRes.findings;
                 if (isBatchCancelledRef.current) return;
                 const textBlob = new Blob([batch.inputText.trim()], { type: 'text/plain' });
                 (textBlob as any).name = 'batch_dictation.txt';
@@ -1005,7 +1007,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                 error: undefined,
             } : b));
 
-            const findings = await processAudio(file, batch.selectedModel, batch.customPrompt, batch.customImages, undefined, selectedTemplate);
+            const findings = await processAudio(file, batch.selectedModel, batch.customPrompt, batch.customImages, undefined, undefined, selectedTemplate);
             const chatSession = await createChat(file, findings, batch.customPrompt, batch.customImages);
             const aiGreeting = "I have reviewed the audio and transcript for this dictation. How can I help you further?";
             const initialChatHistory = [{ author: 'AI' as const, text: `${findings.join('\n\n')}\n\n${aiGreeting}` }];
@@ -1437,7 +1439,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                             const astRes = await mergeFindingsWithAst(
                                 batch.findings.join('\n'),
                                 selectedTemplate as any,
-                                activeModel,
+                                batch.selectedModel || selectedModel,
                                 batch.customPrompt,
                                 batch.customImages || [],
                                 true,
@@ -2400,6 +2402,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                                                             className="bg-white border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 w-full dark:bg-slate-700 dark:border-slate-600 dark:text-white"
                                                             aria-label="Select AI model for reprocessing"
                                                         >
+                                                            <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro</option>
                                                             <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
                                                             <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                                                             <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
@@ -2901,10 +2904,11 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                                                             onChange={(e) => updateBatchModel(batch.id, e.target.value)}
                                                             className="bg-slate-50 border border-slate-300 text-slate-900 text-xs font-semibold rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 w-full sm:w-auto dark:bg-slate-700 dark:border-slate-600 dark:text-white"
                                                         >
-                                                            <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
-                                                            <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+                                                            <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Default)</option>
                                                             <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                                                            <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                                                             <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
+                                                            <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
                                                             <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                                                             <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite</option>
                                                         </select>

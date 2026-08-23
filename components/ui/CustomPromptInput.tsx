@@ -26,6 +26,8 @@ export interface StyleToggles {
 export interface CustomPromptInputProps {
   prompt: string;
   onPromptChange: (prompt: string) => void;
+  images?: Array<{ data: string; mimeType: string }>;
+  onImagesChange?: (images: Array<{ data: string; mimeType: string }>) => void;
   className?: string;
   isLiveMode?: boolean;
   styleToggles?: StyleToggles;
@@ -33,6 +35,13 @@ export interface CustomPromptInputProps {
 }
 
 const MAX_CUSTOM_RULES_LENGTH = 5000;
+
+export const DEFAULT_STYLE_TOGGLES: StyleToggles = {
+  telegraphic: true,
+  boldAbnormalities: true,
+  radsAutoCompute: true,
+  compactImpression: true,
+};
 
 export function sanitizeRuleInput(input: string): string {
   if (!input) return '';
@@ -49,14 +58,11 @@ export function sanitizeRuleInput(input: string): string {
 const CustomPromptInput: React.FC<CustomPromptInputProps> = ({
   prompt,
   onPromptChange,
+  images,
+  onImagesChange,
   className = '',
   isLiveMode = false,
-  styleToggles = {
-    telegraphic: true,
-    boldAbnormalities: true,
-    radsAutoCompute: true,
-    compactImpression: true,
-  },
+  styleToggles,
   onStyleTogglesChange,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -75,7 +81,7 @@ const CustomPromptInput: React.FC<CustomPromptInputProps> = ({
   const [isSavedTemplatesOpen, setIsSavedTemplatesOpen] = useState<boolean>(true);
 
   // Local style toggles state
-  const [localToggles, setLocalToggles] = useState<StyleToggles>(styleToggles);
+  const [localToggles, setLocalToggles] = useState<StyleToggles>(() => styleToggles || DEFAULT_STYLE_TOGGLES);
 
   // Load saved custom templates on mount
   const refreshSavedTemplates = async () => {
@@ -88,8 +94,25 @@ const CustomPromptInput: React.FC<CustomPromptInputProps> = ({
   }, []);
 
   useEffect(() => {
-    setLocalToggles(styleToggles);
-  }, [styleToggles]);
+    if (styleToggles) {
+      setLocalToggles(prev => {
+        if (
+          prev.telegraphic === styleToggles.telegraphic &&
+          prev.boldAbnormalities === styleToggles.boldAbnormalities &&
+          prev.radsAutoCompute === styleToggles.radsAutoCompute &&
+          prev.compactImpression === styleToggles.compactImpression
+        ) {
+          return prev;
+        }
+        return styleToggles;
+      });
+    }
+  }, [
+    styleToggles?.telegraphic,
+    styleToggles?.boldAbnormalities,
+    styleToggles?.radsAutoCompute,
+    styleToggles?.compactImpression,
+  ]);
 
   const handleToggleChange = (key: keyof StyleToggles) => {
     const updated = {

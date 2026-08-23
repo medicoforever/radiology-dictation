@@ -51,7 +51,7 @@ const App: React.FC = () => {
   const [chat, setChat] = useState<Chat | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [isChatting, setIsChatting] = useState<boolean>(false);
-  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.5-flash');
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.1-pro-preview');
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const [customImages, setCustomImages] = useState<Array<{ data: string; mimeType: string }>>([]);
   const [identifiedErrors, setIdentifiedErrors] = useState<IdentifiedError[]>([]);
@@ -250,6 +250,7 @@ const App: React.FC = () => {
         customPrompt,
         customImages,
         undefined,
+        undefined,
         selectedTemplate
       );
       if (isCancelledRef.current) return;
@@ -344,6 +345,7 @@ const App: React.FC = () => {
         customPrompt,
         customImages,
         findings,
+        undefined,
         selectedTemplate
       );
       setFindings(processedText);
@@ -457,6 +459,7 @@ const App: React.FC = () => {
           customPrompt,
           customImages,
           findings,
+          undefined,
           selectedTemplate
         );
         setFindings(processedText);
@@ -637,10 +640,11 @@ const App: React.FC = () => {
                   onChange={(e) => setSelectedModel(e.target.value)}
                   className="bg-slate-50 border border-slate-300 text-slate-900 text-sm font-semibold rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 w-full sm:w-auto dark:bg-slate-700 dark:border-slate-600 dark:text-white"
                 >
-                  <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
-                  <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+                  <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Default)</option>
                   <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                  <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                   <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
+                  <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
                   <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                   <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite</option>
                 </select>
@@ -777,7 +781,8 @@ const App: React.FC = () => {
                   onChange={(e) => setSelectedModel(e.target.value)}
                   className="bg-slate-100 dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-800 dark:text-slate-100 text-xs font-bold rounded-lg p-1.5 focus:ring-2 focus:ring-blue-500"
                 >
-                  <option value="gemini-3.5-flash">Gemini 3.5 Flash (Default)</option>
+                  <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Default)</option>
+                  <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
                   <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                   <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
                   <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>

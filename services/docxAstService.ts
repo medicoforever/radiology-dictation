@@ -316,13 +316,7 @@ export async function applyAstMutationsToDocx(
         const pPr = p.getElementsByTagName('w:pPr')[0];
         if (!pPr) return false;
         const numPr = pPr.getElementsByTagName('w:numPr')[0];
-        if (numPr) return true;
-        const pStyle = pPr.getElementsByTagName('w:pStyle')[0];
-        if (pStyle) {
-          const val = pStyle.getAttribute('w:val') || pStyle.getAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'val') || '';
-          if (val.toLowerCase().includes('list') || val.toLowerCase().includes('bullet')) return true;
-        }
-        return false;
+        return !!numPr;
       };
 
       for (let i = 0; i < impressionItems.length; i++) {

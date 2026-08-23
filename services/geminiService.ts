@@ -6,6 +6,7 @@ import { extractTextFromDocxBlob } from './docxService';
 import { buildDocumentAstFromDocx, applyAstMutationsToDocx, AstMutation } from './docxAstService';
 
 import { isRAGStyleMatchingEnabled, getRelevantStyleTemplates, augmentPromptWithStyleTemplates } from './reportStyleRAG';
+import { findCrossModalitySkills } from './templateCatalog';
 
 export const getAiClient = (lastFailedKey?: string) => {
   const keys = getStoredApiKeys();
@@ -74,6 +75,7 @@ export const isTextBlob = (blob: Blob, fileName?: string): boolean => {
 
 // User's strictly configured model list in exact order
 export const USER_CONFIGURED_MODELS = [
+  'gemini-3.1-pro-preview',
   'gemini-3.5-flash',
   'gemini-3.7-flash',
   'gemini-3-flash-preview',
@@ -82,57 +84,74 @@ export const USER_CONFIGURED_MODELS = [
   'gemini-3.5-flash-lite',
 ];
 
+// Fallback cascade chain stops at gemini-2.5-flash and strictly excludes gemini-3.5-flash-lite
+export const FALLBACK_CHAIN_MODELS = [
+  'gemini-3.1-pro-preview',
+  'gemini-3.5-flash',
+  'gemini-3.7-flash',
+  'gemini-3-flash-preview',
+  'gemini-3.6-flash',
+  'gemini-2.5-flash',
+];
+
+export function getModelFallbackQueue(selectedModel?: string): string[] {
+  const target = getValidModelName(selectedModel || 'gemini-3.1-pro-preview');
+  const indexInChain = FALLBACK_CHAIN_MODELS.indexOf(target);
+  
+  if (indexInChain !== -1) {
+    // Return the selected model followed by all lower-down models in order up to gemini-2.5-flash
+    return FALLBACK_CHAIN_MODELS.slice(indexInChain);
+  }
+  
+  // If selected model is not in the fallback chain (e.g. gemini-3.5-flash-lite), try only that model
+  return [target];
+}
+
 /**
- * Auto-retrying Gemini API caller with Exponential Backoff
- * Fallback sequence strictly follows the user's configured model list in exact order.
- * NO arbitrary models outside the user's list are ever used.
+ * Auto-retrying Gemini API caller with Model Cascading Fallback.
+ * If the selected model encounters a rate limit (429/quota), overload (503/500/high demand),
+ * or any failure, it automatically cascades down the user's defined order:
+ * gemini-3.1-pro-preview -> gemini-3.5-flash -> gemini-3.7-flash -> gemini-3-flash-preview -> gemini-3.6-flash -> gemini-2.5-flash
+ * It strictly stops at gemini-2.5-flash and does NOT cascade to gemini-3.5-flash-lite.
  */
-async function generateContentWithRetry(
-  params: any,
-  maxRetries: number = 3
+export async function generateContentWithRetry(
+  params: any
 ): Promise<GenerateContentResponse> {
-  let currentParams = { ...params };
+  const initialModel = params.model || 'gemini-3.1-pro-preview';
+  const modelQueue = getModelFallbackQueue(initialModel);
+
   let lastError: any = null;
+  let lastFailedKey: string | undefined = undefined;
 
-  const currentRawModel = currentParams.model || 'gemini-3.5-flash';
-  const modelQueue = [
-    currentRawModel,
-    ...USER_CONFIGURED_MODELS.filter(m => getValidModelName(m) !== getValidModelName(currentRawModel))
-  ];
+  for (let i = 0; i < modelQueue.length; i++) {
+    const currentModel = modelQueue[i];
+    const isFallback = i > 0;
+    
+    if (isFallback) {
+      console.warn(`[Gemini Fallback] Previous model failed. Cascading down to lower model: ${currentModel} (attempt ${i + 1}/${modelQueue.length})`);
+    }
 
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      const client = getAiClient().client;
-      return await client.models.generateContent(currentParams);
+      const { client, key } = getAiClient(lastFailedKey);
+      const callParams = {
+        ...params,
+        model: currentModel,
+      };
+      return await client.models.generateContent(callParams);
     } catch (err: any) {
       lastError = err;
       const errStr = String(err?.message || err);
-      const isRetryable = errStr.includes('503') || 
-                          errStr.includes('UNAVAILABLE') || 
-                          errStr.includes('429') || 
-                          errStr.includes('RESOURCE_EXHAUSTED') || 
-                          errStr.includes('high demand') ||
-                          errStr.includes('fetch failed') ||
-                          errStr.includes('overloaded');
-
-      if (!isRetryable || attempt === maxRetries - 1) {
-        break;
-      }
-
-      // Exponential backoff
-      const delay = (attempt + 1) * 700 + Math.random() * 300;
-      console.warn(`[Gemini API] 503/Transient error on attempt ${attempt + 1}. Retrying in ${Math.round(delay)}ms...`);
-      await new Promise(r => setTimeout(r, delay));
-
-      // Strictly try next model from user's configured model list only
-      const nextCandidate = modelQueue[(attempt + 1) % modelQueue.length];
-      if (nextCandidate) {
-        console.warn(`[Gemini API] Trying configured fallback model: ${nextCandidate}`);
-        currentParams.model = getValidModelName(nextCandidate);
+      console.warn(`[Gemini API] Request failed with model ${currentModel}: ${errStr}`);
+      
+      // If there are more models down the chain up to gemini-2.5-flash, cascade to the next one
+      if (i < modelQueue.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        continue;
       }
     }
   }
-  throw lastError;
+
+  throw lastError || new Error(`All models in the fallback chain failed down to gemini-2.5-flash.`);
 }
 
 /**
@@ -248,9 +267,12 @@ const responseSchema = {
 };
 
 export const getValidModelName = (model?: string): string => {
-  if (!model) return 'gemini-3.5-flash';
+  if (!model) return 'gemini-3.1-pro-preview';
   const m = model.toLowerCase().trim();
   
+  if (m.includes('3.1-pro') || m.includes('3.1') || m === 'gemini-3.1-pro-preview') {
+    return 'gemini-3.1-pro-preview';
+  }
   if (m.includes('3.5-flash-lite') || m === 'gemini-3.5-flash-lite') {
     return 'gemini-3.5-flash-lite';
   }
@@ -263,17 +285,8 @@ export const getValidModelName = (model?: string): string => {
   if (m.includes('3.6') || m === 'gemini-3.6-flash') {
     return 'gemini-3.6-flash';
   }
-  if (m.includes('3.5-flash-lite') || m === 'gemini-3.5-flash-lite') {
-    return 'gemini-3.5-flash-lite';
-  }
-  if (m.includes('3.5') || m === 'gemini-3.5-flash') {
-    return 'gemini-3.5-flash';
-  }
   if (m.includes('3-flash') || m === 'gemini-3-flash-preview') {
     return 'gemini-3-flash-preview';
-  }
-  if (m.includes('3.1-pro') || m === 'gemini-3.1-pro-preview') {
-    return 'gemini-3.1-pro-preview';
   }
   if (m === 'gemini-2.5-flash' || m === 'gemini-2.5-pro' || m === 'gemini-2.0-flash' || m === 'gemini-2.0-flash-lite') {
     return m;
@@ -463,7 +476,7 @@ export const processAudio = async (
 
   
   try {
-    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+    const response: GenerateContentResponse = await generateContentWithRetry({
       model: getValidModelName(model),
       contents: parts,
       config: {
@@ -494,7 +507,7 @@ export const processAudio = async (
   }
 };
 
-export const continueAudioDictation = async (existingText: string, audioBlob: Blob, customPrompt?: string): Promise<string> => {
+export const continueAudioDictation = async (existingText: string, audioBlob: Blob, customPrompt?: string, model: string = 'gemini-3.1-pro-preview'): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   let prompt = `You are an expert medical transcriptionist specializing in radiology. A user is adding to their dictation.
@@ -530,8 +543,8 @@ Follow these strict instructions to produce a clean and accurate continuation:
   };
 
   try {
-    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
-      model: getValidModelName('gemini-2.0-flash-lite'),
+    const response: GenerateContentResponse = await generateContentWithRetry({
+      model: getValidModelName(model),
       contents: [textPart, audioPart],
     });
 
@@ -549,7 +562,7 @@ Follow these strict instructions to produce a clean and accurate continuation:
   }
 };
 
-export const modifyFindingWithAudio = async (originalText: string, audioBlob: Blob, customPrompt?: string): Promise<string> => {
+export const modifyFindingWithAudio = async (originalText: string, audioBlob: Blob, customPrompt?: string, model: string = 'gemini-3.1-pro-preview'): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   let prompt = `You are an expert medical transcriptionist assistant. You will be given an existing medical finding text and an audio recording. The audio contains instructions and/or additional dictation to modify the original finding.
@@ -585,8 +598,8 @@ Now, listen to the audio and provide the single, updated finding text.`;
   };
 
   try {
-    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
-      model: getValidModelName('gemini-2.5-flash'),
+    const response: GenerateContentResponse = await generateContentWithRetry({
+      model: getValidModelName(model),
       contents: [textPart, audioPart],
     });
 
@@ -715,7 +728,7 @@ ${JSON.stringify({ findings: currentFindings })}
   });
   
   try {
-    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+    const response: GenerateContentResponse = await generateContentWithRetry({
       model: getValidModelName(model),
       contents: parts,
       config: {
@@ -794,7 +807,7 @@ ${JSON.stringify({ findings: currentFindings })}
   parts.push({ text: prompt });
   
   try {
-    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+    const response: GenerateContentResponse = await generateContentWithRetry({
       model: getValidModelName(model),
       contents: parts,
       config: {
@@ -1102,7 +1115,7 @@ export const processTextFindings = async (
   return { findings: directFindings };
 };
 
-export const transcribeAudioForPrompt = async (audioBlob: Blob, modelName = 'gemini-2.5-flash'): Promise<string> => {
+export const transcribeAudioForPrompt = async (audioBlob: Blob, modelName = 'gemini-3.1-pro-preview'): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   const prompt = `You are an expert medical transcriptionist specializing in radiology dictation.
@@ -1120,7 +1133,7 @@ Transcribe the following radiology dictation audio with 100% precision.
   };
   
   try {
-    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+    const response: GenerateContentResponse = await generateContentWithRetry({
       model: getValidModelName(modelName),
       contents: [textPart, audioPart],
     });
@@ -1142,7 +1155,7 @@ export const createChat = async (
   initialFindings: string[], 
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  model: string = 'gemini-2.5-flash'
+  model: string = 'gemini-3.1-pro-preview'
 ): Promise<Chat> => {
   const fileName = (audioBlob as any).name;
   const fileContent = await prepareFileContentPart(audioBlob, fileName);
@@ -1196,7 +1209,7 @@ export const createChatFromText = async (
   initialFindings: string[], 
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  model: string = 'gemini-2.5-flash'
+  model: string = 'gemini-3.1-pro-preview'
 ): Promise<Chat> => {
   const targetModel = getValidModelName(model);
   const userMessageParts: any[] = [];
@@ -1255,13 +1268,13 @@ const errorSchema = {
     required: ["errors"]
 };
 
-export const identifyPotentialErrors = async (findings: string[], model: string): Promise<IdentifiedError[]> => {
+export const identifyPotentialErrors = async (findings: string[], model: string = 'gemini-3.1-pro-preview'): Promise<IdentifiedError[]> => {
     const textPart = {
         text: `${ERROR_IDENTIFIER_PROMPT}\n\nReport to analyze:\n${JSON.stringify({ findings })}`,
     };
 
     try {
-        const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+        const response: GenerateContentResponse = await generateContentWithRetry({
             model: getValidModelName(model),
             contents: [textPart],
             config: {
@@ -1291,7 +1304,7 @@ export const identifyPotentialErrors = async (findings: string[], model: string)
     }
 };
 
-export async function runAgenticAnalysis(content: string, selectedModel: string = 'gemini-2.5-flash'): Promise<{ finalResult: string; agenticSteps: string; enhancementText: string; }> {
+export async function runAgenticAnalysis(content: string, selectedModel: string = 'gemini-3.1-pro-preview'): Promise<{ finalResult: string; agenticSteps: string; enhancementText: string; }> {
     let agenticSteps = "### Agentic Workflow Log\n\n";
     let initialAnalyses: string[] = [];
     let refinedAnalyses: string[] = [];
@@ -1305,7 +1318,7 @@ export async function runAgenticAnalysis(content: string, selectedModel: string 
         // Step 1: Parallel Initial Analysis
         agenticSteps += "--- STEP 1: Initial Analysis (Fact-Checker Agents) ---\n\n";
         const initialPromises = Array.from({ length: 3 }, () => 
-            getAiClient().client.models.generateContent({
+            generateContentWithRetry({
                 model: targetModel,
                 contents: `${INITIAL_AGENT_PROMPT}\n\n--- CONTENT TO ANALYZE ---\n\n${content}`,
                 config: { tools: [{ googleSearch: {} }] }
@@ -1320,7 +1333,7 @@ export async function runAgenticAnalysis(content: string, selectedModel: string 
         // Step 2: Parallel Refinement
         agenticSteps += "--- STEP 2: Refinement (Peer Reviewer Agents) ---\n\n";
         const refinementPromises = initialAnalyses.map(analysis => 
-            getAiClient().client.models.generateContent({
+            generateContentWithRetry({
                 model: targetModel,
                 contents: `${REFINEMENT_AGENT_PROMPT}\n\n--- ORIGINAL CONTENT ---\n\n${content}\n\n--- INITIAL ANALYSIS TO REFINE ---\n\n${analysis}`,
                 config: { tools: [{ googleSearch: {} }] }
@@ -1348,7 +1361,7 @@ export async function runAgenticAnalysis(content: string, selectedModel: string 
             // Step 1: Sequential Initial Analysis
             agenticSteps += "--- STEP 1: Initial Analysis (Fact-Checker Agents) [SEQUENTIAL] ---\n\n";
             for (let i = 0; i < 3; i++) {
-                const response = await getAiClient().client.models.generateContent({
+                const response = await generateContentWithRetry({
                     model: targetModel,
                     contents: `${INITIAL_AGENT_PROMPT}\n\n--- CONTENT TO ANALYZE ---\n\n${content}`,
                     config: { tools: [{ googleSearch: {} }] }
@@ -1362,7 +1375,7 @@ export async function runAgenticAnalysis(content: string, selectedModel: string 
             agenticSteps += "--- STEP 2: Refinement (Peer Reviewer Agents) [SEQUENTIAL] ---\n\n";
             for (let i = 0; i < initialAnalyses.length; i++) {
                 const analysis = initialAnalyses[i];
-                const response = await getAiClient().client.models.generateContent({
+                const response = await generateContentWithRetry({
                     model: targetModel,
                     contents: `${REFINEMENT_AGENT_PROMPT}\n\n--- ORIGINAL CONTENT ---\n\n${content}\n\n--- INITIAL ANALYSIS TO REFINE ---\n\n${analysis}`,
                     config: { tools: [{ googleSearch: {} }] }
@@ -1386,7 +1399,7 @@ export async function runAgenticAnalysis(content: string, selectedModel: string 
     try {
         // Step 3: Final Synthesis
         agenticSteps += "--- STEP 3: Final Synthesis (Master Editor Agent) ---\n\n";
-        const synthesizerResponse = await getAiClient().client.models.generateContent({
+        const synthesizerResponse = await generateContentWithRetry({
             model: targetModel,
             contents: `${SYNTHESIZER_AGENT_PROMPT}\n\n--- ORIGINAL CONTENT ---\n\n${content}\n\n--- REFINED ANALYSES ---\n\n${refinedAnalyses.join('\n\n---\n\n')}`,
             config: {
@@ -1429,11 +1442,11 @@ export async function runAgenticAnalysis(content: string, selectedModel: string 
     }
 }
 
-export async function runComplexImpressionGeneration(currentFindings: string[], additionalFindings: string, selectedModel: string = 'gemini-2.5-flash'): Promise<{ findings: string[]; expertNotes: string; }> {
+export async function runComplexImpressionGeneration(currentFindings: string[], additionalFindings: string, selectedModel: string = 'gemini-3.1-pro-preview'): Promise<{ findings: string[]; expertNotes: string; }> {
     const content = currentFindings.join('\n\n') + (additionalFindings ? `\n\n${additionalFindings}` : '');
     const targetModel = getValidModelName(selectedModel);
 
-    const { finalResult: expertNotesContent } = await runAgenticAnalysis(content, targetModel);
+    const { finalResult: expertNotesContent, enhancementText } = await runAgenticAnalysis(content, targetModel);
 
     const findingsWithoutImpression = currentFindings.filter(f => !f.toUpperCase().startsWith('IMPRESSION:'));
 
@@ -1460,7 +1473,7 @@ ${expertNotesContent}
 
 Now, generate the complete report including the new impression in the specified JSON format.`;
 
-    const response = await getAiClient().client.models.generateContent({
+    const response = await generateContentWithRetry({
         model: targetModel,
         contents: impressionPrompt,
         config: {
