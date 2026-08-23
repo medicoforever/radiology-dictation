@@ -1,31 +1,44 @@
 import { GoogleGenAI, Type, GenerateContentResponse, Chat } from "@google/genai";
-import { DEFAULT_GEMINI_PROMPT, REPROCESS_GEMINI_PROMPT, TEMPLATE_GEMINI_PROMPT, REPORT_TEMPLATES, ERROR_IDENTIFIER_PROMPT, INITIAL_AGENT_PROMPT, REFINEMENT_AGENT_PROMPT, SYNTHESIZER_AGENT_PROMPT, VISUAL_TEMPLATE_GEMINI_PROMPT } from '../constants';
+import { DEFAULT_GEMINI_PROMPT, REPROCESS_GEMINI_PROMPT, TEMPLATE_GEMINI_PROMPT, STRICT_CUSTOM_TEMPLATE_GEMINI_PROMPT, REPORT_TEMPLATES, ERROR_IDENTIFIER_PROMPT, INITIAL_AGENT_PROMPT, REFINEMENT_AGENT_PROMPT, SYNTHESIZER_AGENT_PROMPT } from '../constants';
 import { IdentifiedError } from "../types";
-import { RADIOLOGY_TEMPLATES_CATALOG } from "./templateCatalog";
-import { SelectedTemplateData } from "../components/ui/TemplateSelectionModal";
-import { extractTextFromDocxBlob } from "./docxService";
+import { getRandomApiKey, getFallbackApiKey, getStoredApiKeys } from './apiKeyStore';
+import { extractTextFromDocxBlob } from './docxService';
 import { buildDocumentAstFromDocx, applyAstMutationsToDocx, AstMutation } from './docxAstService';
 
-export const getAi = () => {
-    const key = process.env.API_KEY || (typeof window !== 'undefined' ? (localStorage.getItem('gemini_api_key') || localStorage.getItem('apiKey') || '') : '');
-    if (!key) {
-        throw new Error("API_KEY environment variable not set. Please ensure Gemini API key is configured.");
-    }
-    return new GoogleGenAI({ apiKey: key });
+import { isRAGStyleMatchingEnabled, getRelevantStyleTemplates, augmentPromptWithStyleTemplates } from './reportStyleRAG';
+
+export const getAiClient = (lastFailedKey?: string) => {
+  const keys = getStoredApiKeys();
+  if (keys.length === 0) {
+    throw new Error("No Gemini API Key found. Please click 'Set API Key' in the top bar or check our Free API Key Guide.");
+  }
+  const selectedKey = lastFailedKey ? getFallbackApiKey(lastFailedKey) : getRandomApiKey();
+  return {
+    client: new GoogleGenAI({ apiKey: selectedKey }),
+    key: selectedKey,
+  };
 };
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || 'AIzaSy_SANDBOX_DEFAULT' });
 
 export const blobToBase64 = (blob: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64data = reader.result as string;
-      // remove the "data:...;base64," part
-      resolve(base64data.split(',')[1]);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
+    if (!blob || !(blob instanceof Blob) || blob.size === 0) {
+      return reject(new Error("Audio file parameter is missing or not a valid Blob. Please re-record or upload a valid audio file."));
+    }
+    try {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64data = reader.result as string;
+        if (!base64data) {
+          return reject(new Error("Failed to read audio file contents."));
+        }
+        resolve(base64data.split(',')[1] || base64data);
+      };
+      reader.onerror = () => reject(new Error("FileReader error while reading audio file."));
+      reader.readAsDataURL(blob);
+    } catch (e) {
+      reject(new Error("Audio file parameter is not a valid Blob. Please re-record or upload a valid audio file."));
+    }
   });
 };
 
@@ -59,7 +72,6 @@ export const isTextBlob = (blob: Blob, fileName?: string): boolean => {
   return false;
 };
 
-export 
 // User's strictly configured model list in exact order
 export const USER_CONFIGURED_MODELS = [
   'gemini-3.5-flash',
@@ -206,7 +218,7 @@ export const prepareFileContentPart = async (blob: Blob, fileName?: string): Pro
         }
       };
     } catch {
-      // Fallback to binary encoding below
+      // Fallback
     }
   }
   const base64 = await blobToBase64(blob);
@@ -221,6 +233,7 @@ export const prepareFileContentPart = async (blob: Blob, fileName?: string): Pro
   };
 };
 
+
 const responseSchema = {
     type: Type.OBJECT,
     properties: {
@@ -232,6 +245,40 @@ const responseSchema = {
             description: "An array of strings, where each string is a corrected sentence or paragraph of the radiology findings."
         }
     }
+};
+
+export const getValidModelName = (model?: string): string => {
+  if (!model) return 'gemini-3.5-flash';
+  const m = model.toLowerCase().trim();
+  
+  if (m.includes('3.5-flash-lite') || m === 'gemini-3.5-flash-lite') {
+    return 'gemini-3.5-flash-lite';
+  }
+  if (m.includes('3.5') || m === 'gemini-3.5-flash') {
+    return 'gemini-3.5-flash';
+  }
+  if (m.includes('3.7') || m === 'gemini-3.7-flash') {
+    return 'gemini-3.7-flash';
+  }
+  if (m.includes('3.6') || m === 'gemini-3.6-flash') {
+    return 'gemini-3.6-flash';
+  }
+  if (m.includes('3.5-flash-lite') || m === 'gemini-3.5-flash-lite') {
+    return 'gemini-3.5-flash-lite';
+  }
+  if (m.includes('3.5') || m === 'gemini-3.5-flash') {
+    return 'gemini-3.5-flash';
+  }
+  if (m.includes('3-flash') || m === 'gemini-3-flash-preview') {
+    return 'gemini-3-flash-preview';
+  }
+  if (m.includes('3.1-pro') || m === 'gemini-3.1-pro-preview') {
+    return 'gemini-3.1-pro-preview';
+  }
+  if (m === 'gemini-2.5-flash' || m === 'gemini-2.5-pro' || m === 'gemini-2.0-flash' || m === 'gemini-2.0-flash-lite') {
+    return m;
+  }
+  return model;
 };
 
 const audioTranscriptCache = new WeakMap<Blob, string>();
@@ -306,7 +353,8 @@ export const processAudio = async (
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
   existingFindings?: string[],
-  selectedTemplate?: SelectedTemplateData | null
+  batchName?: string,
+  selectedTemplate?: { id?: string; name: string; category?: string; modality?: string; lines?: string[] } | null
 ): Promise<string[]> => {
   const isReprocessing = existingFindings && existingFindings.length > 0;
 
@@ -314,7 +362,7 @@ export const processAudio = async (
   if (selectedTemplate && selectedTemplate.lines && selectedTemplate.lines.length > 0 && !isReprocessing) {
     let transcribedText = audioTranscriptCache.get(audioBlob);
     if (!transcribedText || !transcribedText.trim()) {
-      // Step 1: Transcribe audio to verbatim clinical text using user-selected model
+      // Step 1: Transcribe audio to verbatim clinical text
       transcribedText = await transcribeAudioForPrompt(audioBlob, model);
       if (transcribedText) {
         audioTranscriptCache.set(audioBlob, transcribedText);
@@ -354,47 +402,40 @@ export const processAudio = async (
   const fileName = (audioBlob as any).name;
   const fileContent = await prepareFileContentPart(audioBlob, fileName);
 
-  const useTemplate = customPrompt?.toLowerCase().includes('report template') || !!selectedTemplate;
+  const hasCustomImages = customImages && customImages.length > 0;
+  const hasCustomText = customPrompt && customPrompt.trim().length > 0;
+
   let basePrompt: string;
 
   if (isReprocessing) {
       basePrompt = REPROCESS_GEMINI_PROMPT;
-  } else if (selectedTemplate) {
-      const normalFindingsText = selectedTemplate.lines && selectedTemplate.lines.length > 0
-        ? selectedTemplate.lines.map((l, i) => `${i + 1}. ${l}`).join('\n')
-        : selectedTemplate.name;
-      const templateContent = `## ${selectedTemplate.name} Normal Report Template (${selectedTemplate.category || selectedTemplate.modality})\n` +
-        `Modality: ${selectedTemplate.modality}\n` +
-        `Template Normal Findings Structure:\n${normalFindingsText}\n\n` +
-        `STRICT INTEGRATION RULE: When the radiologist dictates abnormal findings or specific observations, integrate them into the above template structure by replacing or updating corresponding normal lines (prefixing dictated/abnormal lines with 'BOLD::'). Preserve all untouched normal lines from the template without 'BOLD::'. Synthesize a final IMPRESSION at the end. If the user dictates 'normal' or 'scan is normal', populate the full normal template.`;
-      basePrompt = TEMPLATE_GEMINI_PROMPT.replace('[INSERT_TEMPLATE_HERE]', templateContent);
-  } else if (useTemplate) {
-      const found = RADIOLOGY_TEMPLATES_CATALOG.find(t =>
-          customPrompt!.toLowerCase().includes(t.name.toLowerCase()) ||
-          (t.code && customPrompt!.toLowerCase().includes(t.code.toLowerCase()))
-      ) || REPORT_TEMPLATES.find(t => customPrompt!.toLowerCase().includes(t.name.toLowerCase()));
-
-      if (found) {
-          const lines = 'lines' in found ? found.lines : JSON.parse(found.content).normal_findings || [];
-          const templateContent = `## ${found.name} Normal Report Template\n` +
-            (Array.isArray(lines) ? lines.join('\n') : found.name);
-          basePrompt = TEMPLATE_GEMINI_PROMPT.replace('[INSERT_TEMPLATE_HERE]', templateContent);
-      } else {
-          basePrompt = TEMPLATE_GEMINI_PROMPT.replace('[INSERT_TEMPLATE_HERE]', '// Template mentioned in custom instructions was not found.');
+  } else if (hasCustomImages || hasCustomText) {
+      basePrompt = STRICT_CUSTOM_TEMPLATE_GEMINI_PROMPT;
+      if (hasCustomText) {
+          basePrompt += `\n\n--- MANDATORY REPORT TEMPLATE & CUSTOM INSTRUCTIONS ---\n${customPrompt}\n--- END TEMPLATE ---`;
       }
-  } else if (customImages && customImages.length > 0) {
-      basePrompt = VISUAL_TEMPLATE_GEMINI_PROMPT;
   } else {
       basePrompt = DEFAULT_GEMINI_PROMPT;
   }
+
+  // Augment base prompt with matching real-world report exemplars from 100K+ report dataset (NEWWWWW.zip)
+  try {
+    if (isRAGStyleMatchingEnabled()) {
+      const hintText = [batchName, customPrompt, existingFindings ? existingFindings.join(' ') : ''].filter(Boolean).join(' ');
+      const styleTemplates = await getRelevantStyleTemplates(hintText || 'Radiology Scan');
+      if (styleTemplates.length > 0) {
+        basePrompt = augmentPromptWithStyleTemplates(basePrompt, styleTemplates);
+      }
+    }
+  } catch (err) {
+    console.warn('RAG style matching lookup failed:', err);
+  }
   
-  const prompt = customPrompt 
-    ? `${basePrompt}\n\nCustom Instructions (Reminder):\n${customPrompt}` 
-    : basePrompt;
+  const prompt = basePrompt;
 
   const parts: any[] = [];
 
-  if (customImages && customImages.length > 0) {
+  if (hasCustomImages) {
     for (const customImage of customImages) {
         parts.push({
             inlineData: {
@@ -404,7 +445,7 @@ export const processAudio = async (
         });
     }
     parts.push({
-      text: `The user has provided ${customImages.length > 1 ? 'images' : 'an image'}. Use ${customImages.length > 1 ? 'them' : 'it'} as a strict visual guide for the structure, layout, and formatting of the final report. The following instructions and context/dictation should be used to populate this template.`
+      text: `STRICT VISUAL LAYOUT DIRECTIVE: The user provided ${customImages.length > 1 ? 'images' : 'an image'} of their exact report template structure above. You MUST strictly follow the exact layout, headings, and formatting shown in ${customImages.length > 1 ? 'these images' : 'this image'} to structure your response.`
     });
   }
   
@@ -422,9 +463,9 @@ export const processAudio = async (
 
   
   try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: model,
-      contents: { parts },
+    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+      model: getValidModelName(model),
+      contents: parts,
       config: {
           responseMimeType: "application/json",
           responseSchema: responseSchema
@@ -489,9 +530,9 @@ Follow these strict instructions to produce a clean and accurate continuation:
   };
 
   try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: 'gemini-flash-lite-latest',
-      contents: { parts: [textPart, audioPart] },
+    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+      model: getValidModelName('gemini-2.0-flash-lite'),
+      contents: [textPart, audioPart],
     });
 
     const resultText = response.text?.trim();
@@ -544,9 +585,9 @@ Now, listen to the audio and provide the single, updated finding text.`;
   };
 
   try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: { parts: [textPart, audioPart] },
+    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+      model: getValidModelName('gemini-2.5-flash'),
+      contents: [textPart, audioPart],
     });
 
     const resultText = response.text?.trim();
@@ -674,9 +715,9 @@ ${JSON.stringify({ findings: currentFindings })}
   });
   
   try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: model,
-      contents: { parts },
+    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+      model: getValidModelName(model),
+      contents: parts,
       config: {
           responseMimeType: "application/json",
           responseSchema: responseSchema
@@ -718,7 +759,7 @@ export const modifyReportWithText = async (
 1.  **Preserve by Default:** Your primary goal is to modify the existing report. **You MUST preserve all original findings unless the instruction explicitly tells you to remove, replace, or merge them.** Do not discard existing information.
 2.  **Formatting for Boldness**:
     *   **Adding New Findings**: When the instruction is to add a new clinical finding, prefix the new finding string with the special marker \`BOLD::\`.
-    *   **Preserving Existing Boldness**: When editing an existing finding, if the original finding in the JSON already starts with \`BOLD::\`, the modified finding MUST also start with \`BOLD::\`. If the original did not have the prefix, do not add it.
+    *   **Preserving Existing Boldness**: When editing an existing finding, if the original finding in the JSON already starts with \`BOLD::\`, the modified finding MUST also start with \`BOLD::\`.
     *   **Exceptions**: Do NOT add the \`BOLD::\` prefix to the "Clinical Profile" string or the "IMPRESSION" string.
 3.  **Interpret Instructions Accurately:** (e.g., editing specific phrases, removing findings, adding findings, reordering, synthesizing impression).
 4.  **Impression Generation:** If an instruction involves creating or modifying an IMPRESSION, formulate concise impression points without verbs or numerical values, formatted as a single string starting with "IMPRESSION:###point 1###point 2...".
@@ -753,10 +794,9 @@ ${JSON.stringify({ findings: currentFindings })}
   parts.push({ text: prompt });
   
   try {
-    const aiInstance = ai;
-    const response: GenerateContentResponse = await aiInstance.models.generateContent({
-      model: model,
-      contents: { parts },
+    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+      model: getValidModelName(model),
+      contents: parts,
       config: {
           responseMimeType: "application/json",
           responseSchema: responseSchema
@@ -808,18 +848,7 @@ export const mergeFindingsWithAst = async (
       : [];
 
     let crossSkillBlock = '';
-    if (secondarySkills.length > 0) {
-      crossSkillBlock = `
-
-### ⚡ CROSS-MODALITY & INCIDENTAL PATHOLOGY CONSULTANT DIRECTIVES (Auto-Detected Secondary Skills):
-The radiologist's dictation includes clinical findings related to adjacent or incidental organ systems. You MUST cross-reference the following specialized consultant directives for those findings:
-` + secondarySkills.map(s => `
-[CROSS-MODALITY SKILL: ${s.name} (${s.category || 'Specialized'})]:
-${s.skillPrompt}
-`).join('
-') + `
-*Directive for Cross-Modality Findings*: Use the exact consultant grading, AST pathological translation, and diagnostic criteria from the matching secondary skill above.`;
-    }
+      crossSkillBlock = `\n\n### ⚡ CROSS-MODALITY & INCIDENTAL PATHOLOGY CONSULTANT DIRECTIVES (Auto-Detected Secondary Skills):\nThe radiologist's dictation includes clinical findings related to adjacent or incidental organ systems. You MUST cross-reference the following specialized consultant directives for those findings:\n` + secondarySkills.map(s => `[CROSS-MODALITY SKILL: ${s.name} (${s.category || 'Specialized'})]:\n${s.skillPrompt}`).join('\n\n') + `\n*Directive for Cross-Modality Findings*: Use the exact consultant grading, AST pathological translation, and diagnostic criteria from the matching secondary skill above.`;
 
     const astPrompt = `You are an expert radiology report integration engine.
 Your task is to merge the radiologist's findings into the target document's exact Abstract Syntax Tree (AST) nodes.
@@ -882,10 +911,9 @@ ${customPrompt ? `\nAdditional Instructions:\n${customPrompt}` : ''}
     }
     parts.push({ text: astPrompt });
 
-    const aiInstance = ai;
-    const response: GenerateContentResponse = await aiInstance.models.generateContent({
-      model: model,
-      contents: { parts },
+    const response: GenerateContentResponse = await generateContentWithRetry({
+      model: getValidModelName(model),
+      contents: parts,
       config: {
         responseMimeType: "application/json",
       },
@@ -902,6 +930,7 @@ ${customPrompt ? `\nAdditional Instructions:\n${customPrompt}` : ''}
         ? result.display_findings
         : [];
 
+      // Apply exact AST mutations to the DOCX DOM
       const docxBlob = await applyAstMutationsToDocx(
         xmlDoc,
         zipEntries,
@@ -1006,10 +1035,9 @@ ${customPrompt ? `\nAdditional Instructions:\n${customPrompt}` : ''}
   parts.push({ text: prompt });
 
   try {
-    const aiInstance = ai;
-    const response: GenerateContentResponse = await aiInstance.models.generateContent({
-      model: model,
-      contents: { parts },
+    const response: GenerateContentResponse = await generateContentWithRetry({
+      model: getValidModelName(model),
+      contents: parts,
       config: {
         responseMimeType: "application/json",
         responseSchema: responseSchema,
@@ -1043,7 +1071,7 @@ export const processTextFindings = async (
   model: string,
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  selectedTemplate?: SelectedTemplateData | null
+  selectedTemplate?: { id: string; name: string; category?: string; modality?: string; lines: string[] } | null
 ): Promise<string[]> => {
   if (selectedTemplate) {
     return mergeFindingsWithTemplate(rawText, selectedTemplate, model, customPrompt, customImages);
@@ -1051,10 +1079,10 @@ export const processTextFindings = async (
 
   const baseBlob = new Blob([rawText], { type: 'text/plain' });
   (baseBlob as any).name = 'pasted_dictation.txt';
-  return processAudio(baseBlob, model, customPrompt, customImages, undefined, selectedTemplate);
+  return processAudio(baseBlob, model, customPrompt, customImages, undefined, undefined, selectedTemplate);
 };
 
-export const transcribeAudioForPrompt = async (audioBlob: Blob, model = 'gemini-2.5-flash'): Promise<string> => {
+export const transcribeAudioForPrompt = async (audioBlob: Blob, modelName = 'gemini-2.5-flash'): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   const prompt = `You are an expert medical transcriptionist specializing in radiology dictation.
@@ -1072,9 +1100,9 @@ Transcribe the following radiology dictation audio with 100% precision.
   };
   
   try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: model,
-      contents: { parts: [textPart, audioPart] },
+    const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+      model: getValidModelName(modelName),
+      contents: [textPart, audioPart],
     });
 
     const resultText = response.text?.trim();
@@ -1093,10 +1121,12 @@ export const createChat = async (
   audioBlob: Blob, 
   initialFindings: string[], 
   customPrompt?: string,
-  customImages?: Array<{ data: string; mimeType: string }> | null
+  customImages?: Array<{ data: string; mimeType: string }> | null,
+  model: string = 'gemini-2.5-flash'
 ): Promise<Chat> => {
   const fileName = (audioBlob as any).name;
   const fileContent = await prepareFileContentPart(audioBlob, fileName);
+  const targetModel = getValidModelName(model);
   
   const userMessageParts: any[] = [];
 
@@ -1129,8 +1159,8 @@ export const createChat = async (
       systemInstruction += `\n\nAdditionally, follow these custom instructions from the user:\n${customPrompt}`;
   }
 
-  const chat = ai.chats.create({
-    model: 'gemini-2.5-pro',
+  const chat = getAiClient().client.chats.create({
+    model: targetModel,
     config: {
       systemInstruction: systemInstruction,
     },
@@ -1145,8 +1175,10 @@ export const createChat = async (
 export const createChatFromText = async (
   initialFindings: string[], 
   customPrompt?: string,
-  customImages?: Array<{ data: string; mimeType: string }> | null
+  customImages?: Array<{ data: string; mimeType: string }> | null,
+  model: string = 'gemini-2.5-flash'
 ): Promise<Chat> => {
+  const targetModel = getValidModelName(model);
   const userMessageParts: any[] = [];
   
   if (customImages && customImages.length > 0) {
@@ -1170,8 +1202,8 @@ export const createChatFromText = async (
       systemInstruction += `\n\nAdditionally, follow these custom instructions from the user:\n${customPrompt}`;
   }
 
-  const chat = ai.chats.create({
-    model: 'gemini-2.5-pro',
+  const chat = getAiClient().client.chats.create({
+    model: targetModel,
     config: {
       systemInstruction: systemInstruction,
     },
@@ -1191,23 +1223,16 @@ const errorSchema = {
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    findingIndex: {
-                        type: Type.INTEGER,
-                        description: "The 0-based index of the finding with a potential error."
-                    },
-                    errorDescription: {
-                        type: Type.STRING,
-                        description: "A concise explanation of the potential error."
-                    },
-                    severity: {
-                        type: Type.STRING,
-                        description: "The severity of the issue: 'WARNING' or 'INFO'."
-                    }
+                    originalText: { type: Type.STRING, description: "The exact phrase or word from the report that contains the error or ambiguity." },
+                    suggestion: { type: Type.STRING, description: "The proposed correction or clarification. For ambiguity, phrase as a question." },
+                    type: { type: Type.STRING, enum: ["potential_error", "clarification"], description: "Use 'potential_error' for clear typos/grammar issues. Use 'clarification' for medical ambiguities." },
+                    reason: { type: Type.STRING, description: "A brief, one-sentence explanation for why this was flagged." }
                 },
-                required: ["findingIndex", "errorDescription", "severity"]
+                required: ["originalText", "suggestion", "type", "reason"]
             }
         }
-    }
+    },
+    required: ["errors"]
 };
 
 export const identifyPotentialErrors = async (findings: string[], model: string): Promise<IdentifiedError[]> => {
@@ -1216,9 +1241,9 @@ export const identifyPotentialErrors = async (findings: string[], model: string)
     };
 
     try {
-        const response: GenerateContentResponse = await ai.models.generateContent({
-            model: model, // use the same model as the main transcription for consistency
-            contents: { parts: [textPart] },
+        const response: GenerateContentResponse = await getAiClient().client.models.generateContent({
+            model: getValidModelName(model),
+            contents: [textPart],
             config: {
                 responseMimeType: "application/json",
                 responseSchema: errorSchema
@@ -1246,11 +1271,12 @@ export const identifyPotentialErrors = async (findings: string[], model: string)
     }
 };
 
-export async function runAgenticAnalysis(content: string): Promise<{ finalResult: string; agenticSteps: string; enhancementText: string; }> {
+export async function runAgenticAnalysis(content: string, selectedModel: string = 'gemini-2.5-flash'): Promise<{ finalResult: string; agenticSteps: string; enhancementText: string; }> {
     let agenticSteps = "### Agentic Workflow Log\n\n";
     let initialAnalyses: string[] = [];
     let refinedAnalyses: string[] = [];
-    const DELAY_MS = 250; // Delay for sequential fallback
+    const DELAY_MS = 250;
+    const targetModel = getValidModelName(selectedModel);
 
     try {
         // --- PRIMARY PATH: PARALLEL EXECUTION ---
@@ -1259,8 +1285,8 @@ export async function runAgenticAnalysis(content: string): Promise<{ finalResult
         // Step 1: Parallel Initial Analysis
         agenticSteps += "--- STEP 1: Initial Analysis (Fact-Checker Agents) ---\n\n";
         const initialPromises = Array.from({ length: 3 }, () => 
-            ai.models.generateContent({
-                model: 'gemini-2.5-pro',
+            getAiClient().client.models.generateContent({
+                model: targetModel,
                 contents: `${INITIAL_AGENT_PROMPT}\n\n--- CONTENT TO ANALYZE ---\n\n${content}`,
                 config: { tools: [{ googleSearch: {} }] }
             })
@@ -1274,8 +1300,8 @@ export async function runAgenticAnalysis(content: string): Promise<{ finalResult
         // Step 2: Parallel Refinement
         agenticSteps += "--- STEP 2: Refinement (Peer Reviewer Agents) ---\n\n";
         const refinementPromises = initialAnalyses.map(analysis => 
-            ai.models.generateContent({
-                model: 'gemini-2.5-pro',
+            getAiClient().client.models.generateContent({
+                model: targetModel,
                 contents: `${REFINEMENT_AGENT_PROMPT}\n\n--- ORIGINAL CONTENT ---\n\n${content}\n\n--- INITIAL ANALYSIS TO REFINE ---\n\n${analysis}`,
                 config: { tools: [{ googleSearch: {} }] }
             })
@@ -1294,18 +1320,16 @@ export async function runAgenticAnalysis(content: string): Promise<{ finalResult
             agenticSteps += "\n---!! PARALLEL EXECUTION FAILED DUE TO RATE LIMITING !! ---\n";
             agenticSteps += `---!! SWITCHING TO SEQUENTIAL EXECUTION WITH DELAYS !! ---\n\n`;
             
-            // Wait a moment before retrying
             await new Promise(resolve => setTimeout(resolve, 1000));
             
-            // Clear previous results before retry
             initialAnalyses = [];
             refinedAnalyses = [];
 
             // Step 1: Sequential Initial Analysis
             agenticSteps += "--- STEP 1: Initial Analysis (Fact-Checker Agents) [SEQUENTIAL] ---\n\n";
             for (let i = 0; i < 3; i++) {
-                const response = await ai.models.generateContent({
-                    model: 'gemini-2.5-pro',
+                const response = await getAiClient().client.models.generateContent({
+                    model: targetModel,
                     contents: `${INITIAL_AGENT_PROMPT}\n\n--- CONTENT TO ANALYZE ---\n\n${content}`,
                     config: { tools: [{ googleSearch: {} }] }
                 });
@@ -1318,8 +1342,8 @@ export async function runAgenticAnalysis(content: string): Promise<{ finalResult
             agenticSteps += "--- STEP 2: Refinement (Peer Reviewer Agents) [SEQUENTIAL] ---\n\n";
             for (let i = 0; i < initialAnalyses.length; i++) {
                 const analysis = initialAnalyses[i];
-                const response = await ai.models.generateContent({
-                    model: 'gemini-2.5-pro',
+                const response = await getAiClient().client.models.generateContent({
+                    model: targetModel,
                     contents: `${REFINEMENT_AGENT_PROMPT}\n\n--- ORIGINAL CONTENT ---\n\n${content}\n\n--- INITIAL ANALYSIS TO REFINE ---\n\n${analysis}`,
                     config: { tools: [{ googleSearch: {} }] }
                 });
@@ -1328,7 +1352,6 @@ export async function runAgenticAnalysis(content: string): Promise<{ finalResult
                 await new Promise(resolve => setTimeout(resolve, DELAY_MS));
             }
         } else {
-            // It's not a rate limit error, so fail the workflow
             console.error("Agentic analysis failed:", err);
             const errorMessage = err instanceof Error ? err.message : "An unknown error occurred during agentic analysis.";
             agenticSteps += `\n---!! WORKFLOW FAILED !! ---\n${errorMessage}`;
@@ -1340,12 +1363,11 @@ export async function runAgenticAnalysis(content: string): Promise<{ finalResult
         }
     }
 
-    // This part runs after either parallel success or sequential fallback success
     try {
         // Step 3: Final Synthesis
         agenticSteps += "--- STEP 3: Final Synthesis (Master Editor Agent) ---\n\n";
-        const synthesizerResponse = await ai.models.generateContent({
-            model: 'gemini-2.5-pro',
+        const synthesizerResponse = await getAiClient().client.models.generateContent({
+            model: targetModel,
             contents: `${SYNTHESIZER_AGENT_PROMPT}\n\n--- ORIGINAL CONTENT ---\n\n${content}\n\n--- REFINED ANALYSES ---\n\n${refinedAnalyses.join('\n\n---\n\n')}`,
             config: {
                 tools: [{ googleSearch: {} }]
@@ -1354,7 +1376,6 @@ export async function runAgenticAnalysis(content: string): Promise<{ finalResult
         const enhancementText = synthesizerResponse.text;
         agenticSteps += `**Agent 3.1 (Synthesizer) Output:**\n\`\`\`\n${enhancementText}\n\`\`\`\n\n`;
 
-        // Output Formatting
         let finalResult = '';
         if (enhancementText.toLowerCase().includes("no significant errors or omissions found")) {
             finalResult = content;
@@ -1377,7 +1398,6 @@ export async function runAgenticAnalysis(content: string): Promise<{ finalResult
 
         return { finalResult, agenticSteps, enhancementText };
     } catch (err) {
-        // This catch handles errors during the synthesis step or if the sequential fallback also fails
         console.error("Agentic analysis failed (post-parallel/sequential):", err);
         const errorMessage = err instanceof Error ? err.message : "An unknown error occurred during the final synthesis step.";
         agenticSteps += `\n---!! WORKFLOW FAILED !! ---\n${errorMessage}`;
@@ -1389,10 +1409,11 @@ export async function runAgenticAnalysis(content: string): Promise<{ finalResult
     }
 }
 
-export async function runComplexImpressionGeneration(currentFindings: string[], additionalFindings: string): Promise<{ findings: string[]; expertNotes: string; }> {
+export async function runComplexImpressionGeneration(currentFindings: string[], additionalFindings: string, selectedModel: string = 'gemini-2.5-flash'): Promise<{ findings: string[]; expertNotes: string; }> {
     const content = currentFindings.join('\n\n') + (additionalFindings ? `\n\n${additionalFindings}` : '');
+    const targetModel = getValidModelName(selectedModel);
 
-    const { finalResult: expertNotesContent, enhancementText } = await runAgenticAnalysis(content);
+    const { finalResult: expertNotesContent } = await runAgenticAnalysis(content, targetModel);
 
     const findingsWithoutImpression = currentFindings.filter(f => !f.toUpperCase().startsWith('IMPRESSION:'));
 
@@ -1419,8 +1440,8 @@ ${expertNotesContent}
 
 Now, generate the complete report including the new impression in the specified JSON format.`;
 
-    const response = await ai.models.generateContent({
-        model: 'gemini-2.5-pro',
+    const response = await getAiClient().client.models.generateContent({
+        model: targetModel,
         contents: impressionPrompt,
         config: {
             responseMimeType: "application/json",
@@ -1442,56 +1463,3 @@ Now, generate the complete report including the new impression in the specified 
         throw new Error("Invalid data structure in complex impression response.");
     }
 }
-
-/**
- * Extract structured template findings & sections from an uploaded image of a template
- */
-export const extractTemplateFromImage = async (
-  imageBlob: Blob
-): Promise<{ name: string; modality: string; lines: string[] }> => {
-  const base64Image = await blobToBase64(imageBlob);
-
-  const prompt = `You are an expert radiologist and medical document parser. Analyze the provided image of a radiology report or report template.
-Extract all normal findings, headers, technique, and impression into a clean, structured list of lines.
-Format your output strictly as a JSON object matching this schema:
-{
-  "name": "Template Title (e.g. CT Brain Plain, MRI Lumbar Spine, USG Whole Abdomen)",
-  "modality": "Modality (e.g. CT, MRI, USG, X-Ray, Mammography)",
-  "lines": [
-    "Line 1 text...",
-    "Line 2 text..."
-  ]
-}
-Do not add markdown backticks. Return valid JSON only.`;
-
-  const imagePart = {
-    inlineData: {
-      mimeType: imageBlob.type || 'image/png',
-      data: base64Image,
-    },
-  };
-  const textPart = { text: prompt };
-
-  try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: { parts: [textPart, imagePart] },
-      config: {
-        responseMimeType: "application/json",
-      }
-    });
-
-    const jsonText = response.text?.trim() || '';
-    const cleaned = jsonText.replace(/^```json\s*|```\s*$/g, '').trim();
-    const result = JSON.parse(cleaned);
-
-    return {
-      name: result.name || 'Uploaded Custom Template',
-      modality: result.modality || 'Custom',
-      lines: Array.isArray(result.lines) ? result.lines : [],
-    };
-  } catch (err) {
-    console.error('Error extracting template from image:', err);
-    throw new Error('Failed to analyze and extract template from image.');
-  }
-};
