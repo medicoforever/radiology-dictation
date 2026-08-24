@@ -922,26 +922,53 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                 let findings: string[] = [];
                 let chatSession: any = null;
 
+                const activeModel = batch.selectedModel || selectedModel;
+                let generatedDocxBlob: Blob | undefined;
+                const isSkillActive = isTemplateSkillEnabled();
+                const customSkillPrompt = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
+                const activeSkillPrompt = isSkillActive ? (customSkillPrompt || (selectedTemplate as any)?.skillPrompt) : undefined;
+
                 if (batch.audioBlobs.length > 0) {
                     const mimeType = batch.audioBlobs[0].type;
                     const mergedBlob = new Blob(batch.audioBlobs, { type: mimeType });
-                    findings = await processAudio(mergedBlob, batch.selectedModel, batch.customPrompt, batch.customImages);
+                    const audioRes = await processAudioWithDocx(
+                        mergedBlob,
+                        activeModel,
+                        batch.customPrompt,
+                        batch.customImages || [],
+                        undefined,
+                        batch.name,
+                        selectedTemplate,
+                        isSkillActive,
+                        activeSkillPrompt
+                    );
+                    findings = audioRes.findings;
+                    generatedDocxBlob = audioRes.docxBlob;
                     if (isBatchCancelledRef.current) return;
-                    chatSession = await createChat(mergedBlob, findings, batch.customPrompt, batch.customImages);
+                    chatSession = await createChat(mergedBlob, findings, batch.customPrompt, batch.customImages || [], activeModel);
                 } else if (batch.inputText && batch.inputText.trim()) {
-                    const textRes = await processTextFindings(batch.inputText.trim(), batch.selectedModel, batch.customPrompt, batch.customImages, selectedTemplate);
+                    const textRes = await processTextFindings(
+                        batch.inputText.trim(),
+                        activeModel,
+                        batch.customPrompt,
+                        batch.customImages || [],
+                        selectedTemplate as any,
+                        isSkillActive,
+                        activeSkillPrompt
+                    );
                     findings = textRes.findings;
+                    generatedDocxBlob = textRes.docxBlob;
                     if (isBatchCancelledRef.current) return;
                     const textBlob = new Blob([batch.inputText.trim()], { type: 'text/plain' });
                     (textBlob as any).name = 'batch_dictation.txt';
-                    chatSession = await createChat(textBlob, findings, batch.customPrompt, batch.customImages);
+                    chatSession = await createChat(textBlob, findings, batch.customPrompt, batch.customImages || [], activeModel);
                 }
 
                 if (isBatchCancelledRef.current) return;
-                const aiGreeting = "I have reviewed the dictation and transcript. How can I help you further?";
+                const aiGreeting = "I have reviewed the dictation and findings. How can I help you further?";
                 const initialChatHistory = [{ author: 'AI' as const, text: `${findings.join('\n\n')}\n\n${aiGreeting}` }];
 
-                setBatches(prev => prev.map(b => b.id === batch.id ? { ...b, status: 'complete', findings, chat: chatSession, chatHistory: initialChatHistory, isChatting: false } : b));
+                setBatches(prev => prev.map(b => b.id === batch.id ? { ...b, status: 'complete', findings, docxBlob: generatedDocxBlob, chat: chatSession, chatHistory: initialChatHistory, isChatting: false } : b));
             } catch (err) {
                 if (isBatchCancelledRef.current) return;
                 const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
@@ -965,26 +992,53 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
             let findings: string[] = [];
             let chatSession: any = null;
 
+            const activeModel = batch.selectedModel || selectedModel;
+            let generatedDocxBlob: Blob | undefined;
+            const isSkillActive = isTemplateSkillEnabled();
+            const customSkillPrompt = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
+            const activeSkillPrompt = isSkillActive ? (customSkillPrompt || (selectedTemplate as any)?.skillPrompt) : undefined;
+
             if (batch.audioBlobs.length > 0) {
                 const mimeType = batch.audioBlobs[0].type;
                 const mergedBlob = new Blob(batch.audioBlobs, { type: mimeType });
-                findings = await processAudio(mergedBlob, batch.selectedModel, batch.customPrompt, batch.customImages);
+                const audioRes = await processAudioWithDocx(
+                    mergedBlob,
+                    activeModel,
+                    batch.customPrompt,
+                    batch.customImages || [],
+                    undefined,
+                    batch.name,
+                    selectedTemplate,
+                    isSkillActive,
+                    activeSkillPrompt
+                );
+                findings = audioRes.findings;
+                generatedDocxBlob = audioRes.docxBlob;
                 if (isBatchCancelledRef.current) return;
-                chatSession = await createChat(mergedBlob, findings, batch.customPrompt, batch.customImages);
+                chatSession = await createChat(mergedBlob, findings, batch.customPrompt, batch.customImages || [], activeModel);
             } else if (batch.inputText && batch.inputText.trim()) {
-                const textRes = await processTextFindings(batch.inputText.trim(), batch.selectedModel, batch.customPrompt, batch.customImages, selectedTemplate);
+                const textRes = await processTextFindings(
+                    batch.inputText.trim(),
+                    activeModel,
+                    batch.customPrompt,
+                    batch.customImages || [],
+                    selectedTemplate as any,
+                    isSkillActive,
+                    activeSkillPrompt
+                );
                 findings = textRes.findings;
+                generatedDocxBlob = textRes.docxBlob;
                 if (isBatchCancelledRef.current) return;
                 const textBlob = new Blob([batch.inputText.trim()], { type: 'text/plain' });
                 (textBlob as any).name = 'batch_dictation.txt';
-                chatSession = await createChat(textBlob, findings, batch.customPrompt, batch.customImages);
+                chatSession = await createChat(textBlob, findings, batch.customPrompt, batch.customImages || [], activeModel);
             }
 
             if (isBatchCancelledRef.current) return;
-            const aiGreeting = "I have reviewed the dictation and transcript. How can I help you further?";
+            const aiGreeting = "I have reviewed the dictation and findings. How can I help you further?";
             const initialChatHistory = [{ author: 'AI' as const, text: `${findings.join('\n\n')}\n\n${aiGreeting}` }];
 
-            setBatches(prev => prev.map(b => b.id === batchId ? { ...b, status: 'complete', findings, chat: chatSession, chatHistory: initialChatHistory, isChatting: false } : b));
+            setBatches(prev => prev.map(b => b.id === batchId ? { ...b, status: 'complete', findings, docxBlob: generatedDocxBlob, chat: chatSession, chatHistory: initialChatHistory, isChatting: false } : b));
         } catch (err) {
             if (isBatchCancelledRef.current) return;
             const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
@@ -1429,24 +1483,33 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
         }
 
         try {
+            const isSkillActive = isTemplateSkillEnabled();
+            const customSkillPrompt = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
+            const activeSkillPrompt = isSkillActive ? (customSkillPrompt || (selectedTemplate as any)?.skillPrompt) : undefined;
+
             for (const batch of batchesWithFindings) {
                 const templateBase64 = selectedTemplate?.docxBase64;
                 const title = selectedTemplate?.name || batch.name || 'Radiology_Report';
                 const cleanName = `${(batch.name || title).replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-                let blob = batch.docxBlob;
+                const activeModel = batch.selectedModel || selectedModel;
+
+                let blob: Blob | null | undefined = (batch.docxBlob instanceof Blob && batch.docxBlob.size > 0) ? batch.docxBlob : null;
                 if (!blob) {
                     if (templateBase64 && batch.findings && batch.findings.length > 0) {
                         try {
                             const astRes = await mergeFindingsWithAst(
                                 batch.findings.join('\n'),
                                 selectedTemplate as any,
-                                batch.selectedModel || selectedModel,
+                                activeModel,
                                 batch.customPrompt,
                                 batch.customImages || [],
-                                true,
-                                (selectedTemplate as any).skillPrompt
+                                isSkillActive,
+                                activeSkillPrompt
                             );
                             blob = astRes.docxBlob;
+                            if (blob) {
+                                setBatches(prev => prev.map(b => b.id === batch.id ? { ...b, docxBlob: blob } : b));
+                            }
                         } catch (e) {
                             console.warn('AST docx generation fallback error:', e);
                         }
