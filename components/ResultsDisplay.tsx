@@ -579,35 +579,9 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
       const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
       const templateBase64 = selectedTemplate?.docxBase64;
 
-      let blob: Blob | null | undefined = (docxBlob instanceof Blob && docxBlob.size > 0) ? docxBlob : null;
-
-      if (!blob && templateBase64) {
-        try {
-          const isSkillActive = isTemplateSkillEnabled();
-          const customSkillPrompt = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
-          const activeSkillPrompt = isSkillActive ? (customSkillPrompt || (selectedTemplate as any)?.skillPrompt) : undefined;
-
-          const astRes = await mergeFindingsWithAst(
-            findings.join('\n'),
-            selectedTemplate as any,
-            selectedModel,
-            customPrompt,
-            customImages || [],
-            isSkillActive,
-            activeSkillPrompt
-          );
-          blob = astRes.docxBlob;
-          if (blob && onDocxBlobChange) {
-            onDocxBlobChange(blob);
-          }
-        } catch (e) {
-          console.warn('AST docx generation fallback error in ResultsDisplay:', e);
-        }
-      }
-
-      if (!blob) {
-        blob = await mergeFindingsIntoDocx(templateBase64, findings, title);
-      }
+      const blob = (docxBlob instanceof Blob && docxBlob.size > 0)
+        ? docxBlob
+        : await mergeFindingsIntoDocx(templateBase64, findings, title);
 
       downloadDocxBlob(blob, cleanFileName);
       showNotification('Downloaded Word DOCX report (Times New Roman 12pt)!');
