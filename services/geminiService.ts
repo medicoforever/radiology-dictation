@@ -956,7 +956,8 @@ ${customPrompt ? `\nAdditional Instructions:\n${customPrompt}` : ''}
         cellMap,
         updates,
         impression,
-        impressionSlotIds
+        impressionSlotIds,
+        displayFindings
       );
 
       const finalFindings = displayFindings.length > 0 ? displayFindings : (selectedTemplate.lines || [selectedTemplate.name]);
