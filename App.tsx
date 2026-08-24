@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import AudioRecorder from './components/AudioRecorder';
 import ResultsDisplay from './components/ResultsDisplay';
 import { AppStatus, IdentifiedError } from './types';
-import { processAudio, createChat, blobToBase64, base64ToBlob, createChatFromText, identifyPotentialErrors } from './services/geminiService';
+import { processAudio, processAudioWithDocx, createChat, blobToBase64, base64ToBlob, createChatFromText, identifyPotentialErrors } from './services/geminiService';
 import Spinner from './components/ui/Spinner';
 import { Chat } from '@google/genai';
 import { saveAudioBlob, getAudioBlob, deleteAudioBlob } from './services/audioStorage';
@@ -61,6 +61,7 @@ const App: React.FC = () => {
   const [selectedTemplate, setSelectedTemplate] = useState<SelectedTemplateData | null>(null);
   const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
   const [autoDownloadDocx, setAutoDownloadDocx] = useState<boolean>(true);
+  const [currentDocxBlob, setCurrentDocxBlob] = useState<Blob | null>(null);
   const [userCustomTemplates, setUserCustomTemplates] = useState<UserTemplate[]>([]);
 
   const [theme, setTheme] = useState(() => {
@@ -244,7 +245,7 @@ const App: React.FC = () => {
     setAudioBlob(audioBlob);
 
     try {
-      const processedText = await processAudio(
+      const { findings: processedText, docxBlob: generatedDocxBlob } = await processAudioWithDocx(
         audioBlob,
         selectedModel,
         customPrompt,
@@ -255,6 +256,7 @@ const App: React.FC = () => {
       );
       if (isCancelledRef.current) return;
       setFindings(processedText);
+      setCurrentDocxBlob(generatedDocxBlob || null);
 
       // DOCX merge & auto-download if template is selected
       if (selectedTemplate && autoDownloadDocx && processedText.length > 0) {
@@ -262,7 +264,7 @@ const App: React.FC = () => {
           const docxBase64 = selectedTemplate.docxBase64;
           const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
           const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-          const blob = await mergeFindingsIntoDocx(docxBase64, processedText, title);
+          const blob = generatedDocxBlob || await mergeFindingsIntoDocx(docxBase64, processedText, title);
           if (!isCancelledRef.current) {
             downloadDocxBlob(blob, cleanFileName);
           }
@@ -297,6 +299,7 @@ const App: React.FC = () => {
     try {
         const processedText = transcript.split('\n').filter(line => line.trim() !== '');
         setFindings(processedText);
+        setCurrentDocxBlob(null);
 
         // DOCX merge & auto-download if template is selected
         if (selectedTemplate && autoDownloadDocx && processedText.length > 0) {
@@ -339,7 +342,7 @@ const App: React.FC = () => {
     setError(null);
     
     try {
-      const processedText = await processAudio(
+      const { findings: processedText, docxBlob: generatedDocxBlob } = await processAudioWithDocx(
         audioBlob,
         selectedModel,
         customPrompt,
@@ -349,6 +352,7 @@ const App: React.FC = () => {
         selectedTemplate
       );
       setFindings(processedText);
+      setCurrentDocxBlob(generatedDocxBlob || null);
 
       // DOCX merge & auto-download ONLY if template is selected
       if (selectedTemplate && autoDownloadDocx && processedText.length > 0) {
@@ -357,7 +361,7 @@ const App: React.FC = () => {
           if (docxBase64) {
             const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
             const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-            const blob = await mergeFindingsIntoDocx(docxBase64, processedText, title);
+            const blob = generatedDocxBlob || await mergeFindingsIntoDocx(docxBase64, processedText, title);
             downloadDocxBlob(blob, cleanFileName);
           }
         } catch (docErr) {
@@ -379,6 +383,7 @@ const App: React.FC = () => {
   }, [audioBlob, selectedModel, customPrompt, customImages, findings, selectedTemplate, autoDownloadDocx]);
 
   const handleUpdateFinding = (index: number, newText: string) => {
+    setCurrentDocxBlob(null);
     setFindings(prevFindings => {
       const updatedFindings = [...prevFindings];
       if (updatedFindings[index] !== undefined) {
@@ -440,6 +445,7 @@ const App: React.FC = () => {
   const resetSingleMode = () => {
     setStatus(AppStatus.Idle);
     setFindings([]);
+    setCurrentDocxBlob(null);
     setError(null);
     setAudioBlob(null);
     setChat(null);
@@ -452,8 +458,7 @@ const App: React.FC = () => {
   const handleContinueDictation = async (newAudioBlob: Blob) => {
     setStatus(AppStatus.Processing);
     try {
-        const fullTranscript = findings.join('\n');
-        const processedText = await processAudio(
+        const { findings: processedText, docxBlob: generatedDocxBlob } = await processAudioWithDocx(
           newAudioBlob,
           selectedModel,
           customPrompt,
@@ -463,6 +468,7 @@ const App: React.FC = () => {
           selectedTemplate
         );
         setFindings(processedText);
+        setCurrentDocxBlob(generatedDocxBlob || null);
 
         if (selectedTemplate && autoDownloadDocx && processedText.length > 0) {
           try {
@@ -470,7 +476,7 @@ const App: React.FC = () => {
             if (docxBase64) {
               const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
               const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-              const blob = await mergeFindingsIntoDocx(docxBase64, processedText, title);
+              const blob = generatedDocxBlob || await mergeFindingsIntoDocx(docxBase64, processedText, title);
               downloadDocxBlob(blob, cleanFileName);
             }
           } catch (docErr) {
@@ -606,7 +612,10 @@ const App: React.FC = () => {
             onModelChange={setSelectedModel}
             onReprocess={handleReprocess}
             onUpdateFinding={handleUpdateFinding}
-            onAllFindingsUpdate={setFindings}
+            onAllFindingsUpdate={(newFindings) => {
+              setCurrentDocxBlob(null);
+              setFindings(newFindings);
+            }}
             onContinueDictation={handleContinueDictation}
             customPrompt={customPrompt}
             onCustomPromptChange={setCustomPrompt}
@@ -616,6 +625,8 @@ const App: React.FC = () => {
             errorCheckStatus={errorCheckStatus}
             selectedTemplate={selectedTemplate}
             onSelectTemplate={setSelectedTemplate}
+            docxBlob={currentDocxBlob}
+            onDocxBlobChange={setCurrentDocxBlob}
           />
         );
       case AppStatus.Error:
