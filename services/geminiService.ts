@@ -6,7 +6,6 @@ import { extractTextFromDocxBlob } from './docxService';
 import { buildDocumentAstFromDocx, applyAstMutationsToDocx, AstMutation } from './docxAstService';
 
 import { isRAGStyleMatchingEnabled, getRelevantStyleTemplates, augmentPromptWithStyleTemplates } from './reportStyleRAG';
-import { findCrossModalitySkills } from './templateCatalog';
 
 export const getAiClient = (lastFailedKey?: string) => {
   const keys = getStoredApiKeys();
@@ -73,87 +72,89 @@ export const isTextBlob = (blob: Blob, fileName?: string): boolean => {
   return false;
 };
 
-// User's strictly configured model list in exact order
+// User's strictly configured model list in exact order down to gemini-2.5-flash (excluding gemini-3.5-flash-lite)
 export const USER_CONFIGURED_MODELS = [
-  'gemini-3.1-pro-preview',
-  'gemini-3.5-flash',
-  'gemini-3.7-flash',
-  'gemini-3-flash-preview',
-  'gemini-3.6-flash',
-  'gemini-2.5-flash',
-  'gemini-3.5-flash-lite',
-];
-
-// Fallback cascade chain stops at gemini-2.5-flash and strictly excludes gemini-3.5-flash-lite
-export const FALLBACK_CHAIN_MODELS = [
-  'gemini-3.1-pro-preview',
   'gemini-3.5-flash',
   'gemini-3.7-flash',
   'gemini-3-flash-preview',
   'gemini-3.6-flash',
   'gemini-2.5-flash',
 ];
-
-export function getModelFallbackQueue(selectedModel?: string): string[] {
-  const target = getValidModelName(selectedModel || 'gemini-3.1-pro-preview');
-  const indexInChain = FALLBACK_CHAIN_MODELS.indexOf(target);
-  
-  if (indexInChain !== -1) {
-    // Return the selected model followed by all lower-down models in order up to gemini-2.5-flash
-    return FALLBACK_CHAIN_MODELS.slice(indexInChain);
-  }
-  
-  // If selected model is not in the fallback chain (e.g. gemini-3.5-flash-lite), try only that model
-  return [target];
-}
 
 /**
- * Auto-retrying Gemini API caller with Model Cascading Fallback.
- * If the selected model encounters a rate limit (429/quota), overload (503/500/high demand),
- * or any failure, it automatically cascades down the user's defined order:
- * gemini-3.1-pro-preview -> gemini-3.5-flash -> gemini-3.7-flash -> gemini-3-flash-preview -> gemini-3.6-flash -> gemini-2.5-flash
- * It strictly stops at gemini-2.5-flash and does NOT cascade to gemini-3.5-flash-lite.
+ * Universal Cascading Gemini API caller with Exponential Backoff & Model Switching
+ * If the selected model hits rate limits or server errors, automatically cascades
+ * sequentially down the exact configured model list until gemini-2.5-flash level.
  */
 export async function generateContentWithRetry(
-  params: any
+  params: any,
+  maxRetriesPerModel: number = 2
 ): Promise<GenerateContentResponse> {
-  const initialModel = params.model || 'gemini-3.1-pro-preview';
-  const modelQueue = getModelFallbackQueue(initialModel);
+  const requestedModel = params.model || 'gemini-3.5-flash';
+  const startModel = getValidModelName(requestedModel);
 
-  let lastError: any = null;
-  let lastFailedKey: string | undefined = undefined;
+  // Build cascade queue starting from requested model down to gemini-2.5-flash, then wrapping around
+  const startIndex = USER_CONFIGURED_MODELS.indexOf(startModel);
+  let modelCascade: string[] = [];
 
-  for (let i = 0; i < modelQueue.length; i++) {
-    const currentModel = modelQueue[i];
-    const isFallback = i > 0;
-    
-    if (isFallback) {
-      console.warn(`[Gemini Fallback] Previous model failed. Cascading down to lower model: ${currentModel} (attempt ${i + 1}/${modelQueue.length})`);
-    }
-
-    try {
-      const { client, key } = getAiClient(lastFailedKey);
-      const callParams = {
-        ...params,
-        model: currentModel,
-      };
-      return await client.models.generateContent(callParams);
-    } catch (err: any) {
-      lastError = err;
-      const errStr = String(err?.message || err);
-      console.warn(`[Gemini API] Request failed with model ${currentModel}: ${errStr}`);
-      
-      // If there are more models down the chain up to gemini-2.5-flash, cascade to the next one
-      if (i < modelQueue.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 150));
-        continue;
-      }
-    }
+  if (startIndex !== -1) {
+    modelCascade = [
+      ...USER_CONFIGURED_MODELS.slice(startIndex),
+      ...USER_CONFIGURED_MODELS.slice(0, startIndex)
+    ];
+  } else {
+    modelCascade = [startModel, ...USER_CONFIGURED_MODELS.filter(m => m !== startModel)];
   }
 
-  throw lastError || new Error(`All models in the fallback chain failed down to gemini-2.5-flash.`);
-}
+  let lastError: any = null;
+  let currentKey: string | undefined = undefined;
 
+  for (const modelToTry of modelCascade) {
+    // Strictly do not cascade to gemini-3.5-flash-lite unless user explicitly selected it
+    if (modelToTry === 'gemini-3.5-flash-lite' && startModel !== 'gemini-3.5-flash-lite') {
+      continue;
+    }
+
+    const currentParams = {
+      ...params,
+      model: getValidModelName(modelToTry)
+    };
+
+    for (let attempt = 0; attempt < maxRetriesPerModel; attempt++) {
+      try {
+        const clientWrapper = getAiClient(currentKey);
+        currentKey = clientWrapper.key;
+        return await clientWrapper.client.models.generateContent(currentParams);
+      } catch (err: any) {
+        lastError = err;
+        const errStr = String(err?.message || err);
+        const isRateLimitOrTransient =
+          errStr.includes('429') ||
+          errStr.includes('RESOURCE_EXHAUSTED') ||
+          errStr.includes('quota') ||
+          errStr.includes('rate limit') ||
+          errStr.includes('503') ||
+          errStr.includes('UNAVAILABLE') ||
+          errStr.includes('high demand') ||
+          errStr.includes('overloaded') ||
+          errStr.includes('fetch failed');
+
+        if (!isRateLimitOrTransient) {
+          console.warn(`[Gemini API] Non-retryable error on model ${modelToTry}:`, errStr);
+          break;
+        }
+
+        console.warn(`[Gemini API] Model ${modelToTry} attempt ${attempt + 1} hit rate limit / transient error (${errStr}). Retrying with next key / next model in cascade...`);
+        currentKey = getFallbackApiKey(currentKey);
+        await new Promise(r => setTimeout(r, 400 + Math.random() * 200));
+      }
+    }
+
+    console.warn(`[Gemini API] Model ${modelToTry} exhausted retries. Cascading down to next model in order...`);
+  }
+
+  throw lastError || new Error("All configured Gemini models in cascade failed.");
+}
 /**
  * Local Deterministic Emergency Fallback
  * Guarantees zero data loss if Google API is completely unavailable.
@@ -267,12 +268,9 @@ const responseSchema = {
 };
 
 export const getValidModelName = (model?: string): string => {
-  if (!model) return 'gemini-3.1-pro-preview';
+  if (!model) return 'gemini-3.5-flash';
   const m = model.toLowerCase().trim();
   
-  if (m.includes('3.1-pro') || m.includes('3.1') || m === 'gemini-3.1-pro-preview') {
-    return 'gemini-3.1-pro-preview';
-  }
   if (m.includes('3.5-flash-lite') || m === 'gemini-3.5-flash-lite') {
     return 'gemini-3.5-flash-lite';
   }
@@ -285,8 +283,17 @@ export const getValidModelName = (model?: string): string => {
   if (m.includes('3.6') || m === 'gemini-3.6-flash') {
     return 'gemini-3.6-flash';
   }
+  if (m.includes('3.5-flash-lite') || m === 'gemini-3.5-flash-lite') {
+    return 'gemini-3.5-flash-lite';
+  }
+  if (m.includes('3.5') || m === 'gemini-3.5-flash') {
+    return 'gemini-3.5-flash';
+  }
   if (m.includes('3-flash') || m === 'gemini-3-flash-preview') {
     return 'gemini-3-flash-preview';
+  }
+  if (m.includes('3.1-pro') || m === 'gemini-3.1-pro-preview') {
+    return 'gemini-3.1-pro-preview';
   }
   if (m === 'gemini-2.5-flash' || m === 'gemini-2.5-pro' || m === 'gemini-2.0-flash' || m === 'gemini-2.0-flash-lite') {
     return m;
@@ -509,7 +516,7 @@ export const processAudio = async (
   }
 };
 
-export const continueAudioDictation = async (existingText: string, audioBlob: Blob, customPrompt?: string, model: string = 'gemini-3.1-pro-preview'): Promise<string> => {
+export const continueAudioDictation = async (existingText: string, audioBlob: Blob, customPrompt?: string): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   let prompt = `You are an expert medical transcriptionist specializing in radiology. A user is adding to their dictation.
@@ -546,7 +553,7 @@ Follow these strict instructions to produce a clean and accurate continuation:
 
   try {
     const response: GenerateContentResponse = await generateContentWithRetry({
-      model: getValidModelName(model),
+      model: getValidModelName('gemini-2.0-flash-lite'),
       contents: [textPart, audioPart],
     });
 
@@ -564,7 +571,7 @@ Follow these strict instructions to produce a clean and accurate continuation:
   }
 };
 
-export const modifyFindingWithAudio = async (originalText: string, audioBlob: Blob, customPrompt?: string, model: string = 'gemini-3.1-pro-preview'): Promise<string> => {
+export const modifyFindingWithAudio = async (originalText: string, audioBlob: Blob, customPrompt?: string): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   let prompt = `You are an expert medical transcriptionist assistant. You will be given an existing medical finding text and an audio recording. The audio contains instructions and/or additional dictation to modify the original finding.
@@ -601,7 +608,7 @@ Now, listen to the audio and provide the single, updated finding text.`;
 
   try {
     const response: GenerateContentResponse = await generateContentWithRetry({
-      model: getValidModelName(model),
+      model: getValidModelName('gemini-2.5-flash'),
       contents: [textPart, audioPart],
     });
 
@@ -910,17 +917,10 @@ ${findingsText}
    - If all findings normal: "IMPRESSION:###Normal study.###No significant abnormality detected."
 8. **TITLE IMMUTABILITY MANDATE**:
    - The document title belongs strictly to the template document and MUST NOT be altered, shortened, or replaced by outside UI names or abbreviations. Do NOT include any title node in "updates".
-9. **BRAND-NEW / INCIDENTAL FINDINGS MANDATE ("inserted_findings")**:
-   - If the radiologist dictates a pathology, measurement, or incidental finding that does NOT have a corresponding baseline node in the template AST (e.g. pleural effusion, atelectasis, lymphadenopathy, incidental cysts, fractures), you MUST include it in "inserted_findings" specifying:
-     { "insert_after_node_id": "<id of the preceding paragraph or paragraph immediately before IMPRESSION>", "text": "Exact clinical finding text", "bold": false }
-   - Also ensure it is present in "display_findings" at that exact same sequential position.
-10. Return JSON schema:
+9. Return JSON schema:
 {
   "updates": [
     { "node_id": "node_...", "new_text": "...", "bold": true }
-  ],
-  "inserted_findings": [
-    { "insert_after_node_id": "node_...", "text": "...", "bold": false }
   ],
   "impression": ["..."],
   "display_findings": ["..."]
@@ -956,7 +956,6 @@ ${customPrompt ? `\nAdditional Instructions:\n${customPrompt}` : ''}
       const result = JSON.parse(cleaned);
 
       const updates: AstMutation[] = Array.isArray(result.updates) ? result.updates : [];
-      const rawInsertedFindings: any[] = Array.isArray(result.inserted_findings) ? result.inserted_findings : [];
       let impression: string[] = Array.isArray(result.impression) ? result.impression : [];
       const displayFindings: string[] = Array.isArray(result.display_findings) && result.display_findings.length > 0
         ? result.display_findings
@@ -996,59 +995,6 @@ ${customPrompt ? `\nAdditional Instructions:\n${customPrompt}` : ''}
         displayFindings[0] = docTitle;
       }
 
-      // Collect any extra/incidental findings from displayFindings that were not assigned to an AST node in safeUpdates
-      const updatedFindingTexts = new Set(safeUpdates.map(u => (u.new_text || '').replace(/^BOLD::\s*/, '').trim()));
-      const extraFindings: string[] = [];
-      let inImpSection = false;
-      for (let i = 0; i < displayFindings.length; i++) {
-        const df = displayFindings[i].trim();
-        if (!df) continue;
-        if (i === 0 && docTitle && df.toLowerCase().replace(/[^a-z0-9]/g, '') === docTitle.toLowerCase().replace(/[^a-z0-9]/g, '')) continue;
-        if (df.toUpperCase().startsWith('IMPRESSION:') || df.toUpperCase().startsWith('CONCLUSION:')) {
-          inImpSection = true;
-          continue;
-        }
-        if (inImpSection) continue;
-        if (df.includes('|')) continue;
-
-        const cleanDf = df.replace(/^BOLD::\s*/, '').trim();
-        const normDf = cleanDf.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!normDf) continue;
-
-        let wasUpdated = false;
-        for (const ut of updatedFindingTexts) {
-          const normUt = ut.toLowerCase().replace(/[^a-z0-9]/g, '');
-          if (normUt && normDf && normUt === normDf) {
-            wasUpdated = true;
-            break;
-          }
-        }
-        if (!wasUpdated) {
-          const existsInAst = ast.some(n => {
-            if (n.type === 'table_cell') return false;
-            const normAst = (n.current_text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-            return normAst && normDf && normAst === normDf;
-          });
-          if (!existsInAst) {
-            extraFindings.push(df);
-          }
-        }
-      }
-
-      // Combine AI explicit inserted_findings with extra findings
-      const allInsertions: any[] = [...rawInsertedFindings];
-      const insertedTexts = new Set(allInsertions.map(i => ((typeof i === 'string' ? i : i.text) || '').toLowerCase().replace(/[^a-z0-9]/g, '')));
-      for (const ef of extraFindings) {
-        const normEf = ef.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!insertedTexts.has(normEf)) {
-          allInsertions.push({
-            text: ef,
-            bold: ef.startsWith('BOLD::')
-          });
-          insertedTexts.add(normEf);
-        }
-      }
-
       // Apply exact AST mutations to the DOCX DOM
       const docxBlob = await applyAstMutationsToDocx(
         xmlDoc,
@@ -1058,8 +1004,7 @@ ${customPrompt ? `\nAdditional Instructions:\n${customPrompt}` : ''}
         safeUpdates,
         impression,
         impressionSlotIds,
-        impressionHeaderId,
-        allInsertions
+        impressionHeaderId
       );
 
       const finalFindings = displayFindings.length > 0 ? displayFindings : (selectedTemplate.lines || [selectedTemplate.name]);
@@ -1227,7 +1172,7 @@ export const processTextFindings = async (
   return { findings: directFindings };
 };
 
-export const transcribeAudioForPrompt = async (audioBlob: Blob, modelName = 'gemini-3.1-pro-preview'): Promise<string> => {
+export const transcribeAudioForPrompt = async (audioBlob: Blob, modelName = 'gemini-2.5-flash'): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   const prompt = `You are an expert medical transcriptionist specializing in radiology dictation.
@@ -1267,7 +1212,7 @@ export const createChat = async (
   initialFindings: string[], 
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  model: string = 'gemini-3.1-pro-preview'
+  model: string = 'gemini-2.5-flash'
 ): Promise<Chat> => {
   const fileName = (audioBlob as any).name;
   const fileContent = await prepareFileContentPart(audioBlob, fileName);
@@ -1321,7 +1266,7 @@ export const createChatFromText = async (
   initialFindings: string[], 
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  model: string = 'gemini-3.1-pro-preview'
+  model: string = 'gemini-2.5-flash'
 ): Promise<Chat> => {
   const targetModel = getValidModelName(model);
   const userMessageParts: any[] = [];
@@ -1380,7 +1325,7 @@ const errorSchema = {
     required: ["errors"]
 };
 
-export const identifyPotentialErrors = async (findings: string[], model: string = 'gemini-3.1-pro-preview'): Promise<IdentifiedError[]> => {
+export const identifyPotentialErrors = async (findings: string[], model: string): Promise<IdentifiedError[]> => {
     const textPart = {
         text: `${ERROR_IDENTIFIER_PROMPT}\n\nReport to analyze:\n${JSON.stringify({ findings })}`,
     };
@@ -1416,7 +1361,7 @@ export const identifyPotentialErrors = async (findings: string[], model: string 
     }
 };
 
-export async function runAgenticAnalysis(content: string, selectedModel: string = 'gemini-3.1-pro-preview'): Promise<{ finalResult: string; agenticSteps: string; enhancementText: string; }> {
+export async function runAgenticAnalysis(content: string, selectedModel: string = 'gemini-2.5-flash'): Promise<{ finalResult: string; agenticSteps: string; enhancementText: string; }> {
     let agenticSteps = "### Agentic Workflow Log\n\n";
     let initialAnalyses: string[] = [];
     let refinedAnalyses: string[] = [];
@@ -1554,11 +1499,11 @@ export async function runAgenticAnalysis(content: string, selectedModel: string 
     }
 }
 
-export async function runComplexImpressionGeneration(currentFindings: string[], additionalFindings: string, selectedModel: string = 'gemini-3.1-pro-preview'): Promise<{ findings: string[]; expertNotes: string; }> {
+export async function runComplexImpressionGeneration(currentFindings: string[], additionalFindings: string, selectedModel: string = 'gemini-2.5-flash'): Promise<{ findings: string[]; expertNotes: string; }> {
     const content = currentFindings.join('\n\n') + (additionalFindings ? `\n\n${additionalFindings}` : '');
     const targetModel = getValidModelName(selectedModel);
 
-    const { finalResult: expertNotesContent, enhancementText } = await runAgenticAnalysis(content, targetModel);
+    const { finalResult: expertNotesContent } = await runAgenticAnalysis(content, targetModel);
 
     const findingsWithoutImpression = currentFindings.filter(f => !f.toUpperCase().startsWith('IMPRESSION:'));
 
