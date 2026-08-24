@@ -1,4 +1,4 @@
-import rawTemplatesData from './templatesData.json';
+﻿import rawTemplatesData from './templatesData.json';
 
 export interface RadiologyDocxTemplate {
   id: string;
@@ -38,7 +38,7 @@ export async function initializeTemplateCatalog(): Promise<RadiologyDocxTemplate
   } catch (e) {}
 
   try {
-    const ghRes = await fetch('https://raw.githubusercontent.com/medicoforever/radiology-dictation/main/public/templatesData.json');
+    const ghRes = await fetch('https://raw.githubusercontent.com/medicoforever/radnito/main/public/templatesData.json');
     if (ghRes.ok) {
       const ghData = await ghRes.json();
       if (Array.isArray(ghData) && ghData.length >= 70) {
@@ -64,6 +64,7 @@ export function filterTemplates(query: string, modalityFilter: string = 'ALL'): 
   const q = query.toLowerCase().trim();
   return list.filter(t =>
     t.name?.toLowerCase().includes(q) ||
+    (t.title && t.title.toLowerCase().includes(q)) ||
     (t.code && t.code.toLowerCase().includes(q)) ||
     t.category?.toLowerCase().includes(q) ||
     t.modality?.toLowerCase().includes(q) ||
