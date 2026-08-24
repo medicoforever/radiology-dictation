@@ -256,17 +256,22 @@ const App: React.FC = () => {
       );
       if (isCancelledRef.current) return;
       setFindings(processedText);
-      setCurrentDocxBlob(generatedDocxBlob || null);
+
+      let docxToUse = generatedDocxBlob || null;
+      if (!docxToUse && selectedTemplate && processedText.length > 0) {
+        try {
+          docxToUse = await mergeFindingsIntoDocx(selectedTemplate.docxBase64, processedText, selectedTemplate.name || processedText[0] || 'Radiology_Report');
+        } catch (e) {}
+      }
+      setCurrentDocxBlob(docxToUse);
 
       // DOCX merge & auto-download if template is selected
-      if (selectedTemplate && autoDownloadDocx && processedText.length > 0) {
+      if (selectedTemplate && autoDownloadDocx && processedText.length > 0 && docxToUse) {
         try {
-          const docxBase64 = selectedTemplate.docxBase64;
           const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
           const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-          const blob = generatedDocxBlob || await mergeFindingsIntoDocx(docxBase64, processedText, title);
           if (!isCancelledRef.current) {
-            downloadDocxBlob(blob, cleanFileName);
+            downloadDocxBlob(docxToUse, cleanFileName);
           }
         } catch (docErr) {
           console.warn('Auto DOCX download error:', docErr);
@@ -352,18 +357,21 @@ const App: React.FC = () => {
         selectedTemplate
       );
       setFindings(processedText);
-      setCurrentDocxBlob(generatedDocxBlob || null);
+
+      let docxToUse = generatedDocxBlob || null;
+      if (!docxToUse && selectedTemplate && processedText.length > 0) {
+        try {
+          docxToUse = await mergeFindingsIntoDocx(selectedTemplate.docxBase64, processedText, selectedTemplate.name || processedText[0] || 'Radiology_Report');
+        } catch (e) {}
+      }
+      setCurrentDocxBlob(docxToUse);
 
       // DOCX merge & auto-download ONLY if template is selected
-      if (selectedTemplate && autoDownloadDocx && processedText.length > 0) {
+      if (selectedTemplate && autoDownloadDocx && processedText.length > 0 && docxToUse) {
         try {
-          const docxBase64 = selectedTemplate.docxBase64;
-          if (docxBase64) {
-            const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
-            const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-            const blob = generatedDocxBlob || await mergeFindingsIntoDocx(docxBase64, processedText, title);
-            downloadDocxBlob(blob, cleanFileName);
-          }
+          const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
+          const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
+          downloadDocxBlob(docxToUse, cleanFileName);
         } catch (docErr) {
           console.warn('Auto DOCX download error:', docErr);
         }
