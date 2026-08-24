@@ -28,8 +28,7 @@ import { IdentifiedError } from '../types';
 import WarningIcon from './icons/WarningIcon';
 import BrainIcon from './icons/BrainIcon';
 import { mergeFindingsIntoDocx, downloadDocxBlob } from '../services/docxService';
-import { RADIOLOGY_TEMPLATES_CATALOG } from '../services/templateCatalog';
-import { isTemplateSkillEnabled, getTemplateCustomPrompt } from '../services/templateStorage';
+import { isTemplateSkillEnabled, isConsultantStyleEnabled, getTemplateCustomPrompt } from '../services/templateStorage';
 import { SelectedTemplateData } from './ui/TemplateSelectionModal';
 
 
@@ -925,6 +924,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                 const activeModel = batch.selectedModel || selectedModel;
                 let generatedDocxBlob: Blob | undefined;
                 const isSkillActive = isTemplateSkillEnabled();
+                const isConsultantStyleActive = isConsultantStyleEnabled();
                 const customSkillPrompt = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
                 const activeSkillPrompt = isSkillActive ? (customSkillPrompt || (selectedTemplate as any)?.skillPrompt) : undefined;
 
@@ -940,7 +940,8 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                         batch.name,
                         selectedTemplate,
                         isSkillActive,
-                        activeSkillPrompt
+                        activeSkillPrompt,
+                        isConsultantStyleActive
                     );
                     findings = audioRes.findings;
                     generatedDocxBlob = audioRes.docxBlob;
@@ -954,7 +955,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                         batch.customImages || [],
                         selectedTemplate as any,
                         isSkillActive,
-                        activeSkillPrompt
+                        isConsultantStyleActive
                     );
                     findings = textRes.findings;
                     generatedDocxBlob = textRes.docxBlob;
@@ -1017,6 +1018,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
             const activeModel = batch.selectedModel || selectedModel;
             let generatedDocxBlob: Blob | undefined;
             const isSkillActive = isTemplateSkillEnabled();
+            const isConsultantStyleActive = isConsultantStyleEnabled();
             const customSkillPrompt = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
             const activeSkillPrompt = isSkillActive ? (customSkillPrompt || (selectedTemplate as any)?.skillPrompt) : undefined;
 
@@ -1032,7 +1034,8 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                     batch.name,
                     selectedTemplate,
                     isSkillActive,
-                    activeSkillPrompt
+                    activeSkillPrompt,
+                    isConsultantStyleActive
                 );
                 findings = audioRes.findings;
                 generatedDocxBlob = audioRes.docxBlob;
@@ -1046,7 +1049,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                     batch.customImages || [],
                     selectedTemplate as any,
                     isSkillActive,
-                    activeSkillPrompt
+                    isConsultantStyleActive
                 );
                 findings = textRes.findings;
                 generatedDocxBlob = textRes.docxBlob;

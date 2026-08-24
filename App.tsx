@@ -18,7 +18,7 @@ import CustomPromptInput from './components/ui/CustomPromptInput';
 import TemplateSelectorBanner from './components/ui/TemplateSelectorBanner';
 import TemplateSelectionModal, { SelectedTemplateData } from './components/ui/TemplateSelectionModal';
 import { mergeFindingsIntoDocx, downloadDocxBlob } from './services/docxService';
-import { getUserTemplates, UserTemplate } from './services/templateStorage';
+import { getUserTemplates, UserTemplate, isTemplateSkillEnabled, isConsultantStyleEnabled, getTemplateCustomPrompt } from './services/templateStorage';
 
 interface ChatMessage {
   author: 'You' | 'AI';
@@ -245,6 +245,9 @@ const App: React.FC = () => {
     setAudioBlob(audioBlob);
 
     try {
+      const isSkillActive = isTemplateSkillEnabled();
+      const isConsultantActive = isConsultantStyleEnabled();
+      const customSkill = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
       const { findings: processedText, docxBlob: generatedDocxBlob } = await processAudioWithDocx(
         audioBlob,
         selectedModel,
@@ -252,7 +255,10 @@ const App: React.FC = () => {
         customImages,
         undefined,
         undefined,
-        selectedTemplate
+        selectedTemplate,
+        isSkillActive,
+        isSkillActive ? (customSkill || selectedTemplate.skillPrompt) : undefined,
+        isConsultantActive
       );
       if (isCancelledRef.current) return;
       setFindings(processedText);
@@ -347,6 +353,9 @@ const App: React.FC = () => {
     setError(null);
     
     try {
+      const isSkillActive = isTemplateSkillEnabled();
+      const isConsultantActive = isConsultantStyleEnabled();
+      const customSkill = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
       const { findings: processedText, docxBlob: generatedDocxBlob } = await processAudioWithDocx(
         audioBlob,
         selectedModel,
@@ -354,7 +363,10 @@ const App: React.FC = () => {
         customImages,
         findings,
         undefined,
-        selectedTemplate
+        selectedTemplate,
+        isSkillActive,
+        isSkillActive ? (customSkill || selectedTemplate.skillPrompt) : undefined,
+        isConsultantActive
       );
       setFindings(processedText);
 
@@ -466,6 +478,9 @@ const App: React.FC = () => {
   const handleContinueDictation = async (newAudioBlob: Blob) => {
     setStatus(AppStatus.Processing);
     try {
+        const isSkillActive = isTemplateSkillEnabled();
+        const isConsultantActive = isConsultantStyleEnabled();
+        const customSkill = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
         const { findings: processedText, docxBlob: generatedDocxBlob } = await processAudioWithDocx(
           newAudioBlob,
           selectedModel,
@@ -473,7 +488,10 @@ const App: React.FC = () => {
           customImages,
           findings,
           undefined,
-          selectedTemplate
+          selectedTemplate,
+          isSkillActive,
+          isSkillActive ? (customSkill || selectedTemplate.skillPrompt) : undefined,
+          isConsultantActive
         );
         setFindings(processedText);
         setCurrentDocxBlob(generatedDocxBlob || null);
