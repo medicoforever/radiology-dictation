@@ -3,6 +3,7 @@ import { parseZip, createZip, base64ToUint8Array, ZipEntry } from './docxService
 export interface DocumentAstNode {
   id: string;
   type: 'title' | 'clinical_profile' | 'technique' | 'section_heading' | 'inline_field' | 'narrative' | 'impression_header' | 'impression_item' | 'table_cell';
+  section?: string;
   label?: string;
   current_text: string;
   current_val?: string;
@@ -15,6 +16,12 @@ export interface AstMutation {
   node_id: string;
   action?: 'replace_text' | 'update_value' | 'set_cell';
   new_text: string;
+  bold?: boolean;
+}
+
+export interface AstInsertion {
+  after_node_id?: string;
+  text: string;
   bold?: boolean;
 }
 
@@ -80,6 +87,7 @@ export async function buildDocumentAstFromDocx(docxBase64: string): Promise<{
 
   let nodeIndex = 0;
   let inImpressionSection = false;
+  let currentSection = 'header';
 
   for (let i = 0; i < body.childNodes.length; i++) {
     const node = body.childNodes[i];
@@ -105,6 +113,7 @@ export async function buildDocumentAstFromDocx(docxBase64: string): Promise<{
         pType = 'impression_header';
         impressionHeaderId = nodeId;
         inImpressionSection = true;
+        currentSection = 'impression';
       } else if (inImpressionSection) {
         pType = 'impression_item';
         if (txt && !txt.includes('MD') && !txt.includes('RADIOLOGIST') && !txt.includes('Page ')) {
@@ -117,6 +126,7 @@ export async function buildDocumentAstFromDocx(docxBase64: string): Promise<{
       } else if (txt.endsWith(':') || (txt.includes(':') && txt.split(':')[0].split(/\s+/).length <= 4 && !txt.split(':')[1].trim())) {
         pType = 'section_heading';
         label = txt.split(':')[0].trim();
+        currentSection = label.toLowerCase().replace(/[^a-z0-9]/g, '');
       } else if (txt.includes(':') && !upper.startsWith('FINDINGS') && !upper.startsWith('OBSERVATIONS') && !upper.startsWith('C.T.') && !upper.startsWith('MRI')) {
         pType = 'inline_field';
         const parts = txt.split(':', 2);
@@ -129,6 +139,7 @@ export async function buildDocumentAstFromDocx(docxBase64: string): Promise<{
       ast.push({
         id: nodeId,
         type: pType,
+        section: currentSection,
         label,
         current_text: txt,
         current_val: val,
@@ -191,7 +202,9 @@ export async function applyAstMutationsToDocx(
   cellMap: Map<string, Element>,
   mutations: AstMutation[],
   impressionItems?: string[],
-  impressionSlotIds: string[] = []
+  impressionSlotIds: string[] = [],
+  impressionHeaderId?: string,
+  insertedFindings?: (string | AstInsertion)[]
 ): Promise<Blob> {
   const ensureBoldOnRun = (run: Element, makeBold: boolean) => {
     let rPr = run.getElementsByTagName('w:rPr')[0];
@@ -215,7 +228,19 @@ export async function applyAstMutationsToDocx(
         allRuns.push(p.childNodes[i] as Element);
       }
     }
-    if (allRuns.length === 0) return;
+    // Option B: If the table cell or paragraph is completely empty (0 runs), auto-create run inheriting parent styles!
+    if (allRuns.length === 0) {
+      const newRun = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:r');
+      const pPr = p.getElementsByTagName('w:pPr')[0];
+      const pRPr = pPr?.getElementsByTagName('w:rPr')[0];
+      if (pRPr) {
+        newRun.appendChild(pRPr.cloneNode(true));
+      }
+      const newT = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:t');
+      newRun.appendChild(newT);
+      p.appendChild(newRun);
+      allRuns.push(newRun);
+    }
 
     const firstRun = allRuns[0];
     if (rawText.includes('BOLD::')) {
@@ -311,106 +336,355 @@ export async function applyAstMutationsToDocx(
     }
   }
 
-  // 2. Apply Impression Bullets
-  if (impressionItems && impressionItems.length > 0 && impressionSlotIds.length > 0) {
-    const slotElements = impressionSlotIds.map(id => pMap.get(id)).filter(Boolean) as Element[];
-    if (slotElements.length > 0) {
-      const lastSlot = slotElements[slotElements.length - 1];
-      let lastInserted = lastSlot;
-
-      const hasNativeBullet = (p: Element): boolean => {
-        const pPr = p.getElementsByTagName('w:pPr')[0];
-        if (!pPr) return false;
-        const numPr = pPr.getElementsByTagName('w:numPr')[0];
-        return !!numPr;
-      };
-
-      for (let i = 0; i < impressionItems.length; i++) {
-        const cleanBullet = impressionItems[i].replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim();
-        if (i < slotElements.length) {
-          const p = slotElements[i];
-          const isNative = hasNativeBullet(p);
-          const bulletText = isNative ? cleanBullet : `• ${cleanBullet}`;
-          const tTags = p.getElementsByTagName('w:t');
-          if (tTags.length > 0) {
-            tTags[0].textContent = bulletText;
-            tTags[0].setAttribute('xml:space', 'preserve');
-            for (let j = 1; j < tTags.length; j++) tTags[j].textContent = '';
+  // 1.5. Clean-Run Paragraph Insertion for Incidental / Non-Template Findings
+  if (insertedFindings && insertedFindings.length > 0) {
+    let headerEl: Element | null = null;
+    if (impressionHeaderId && pMap.has(impressionHeaderId)) {
+      headerEl = pMap.get(impressionHeaderId)!;
+    }
+    if (!headerEl) {
+      pMap.forEach((el) => {
+        if (!headerEl) {
+          const t = getElementText(el).trim().toUpperCase();
+          if (t === 'IMPRESSION:' || t.startsWith('IMPRESSION:') || t === 'CONCLUSION:' || t.startsWith('CONCLUSION:')) {
+            headerEl = el;
           }
+        }
+      });
+    }
+
+    const createCleanBodyParagraph = (rawText: string, isBold: boolean): Element => {
+      const p = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:p');
+      const pPr = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:pPr');
+      const spacing = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:spacing');
+      spacing.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:after', '0');
+      spacing.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:line', '240');
+      spacing.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:lineRule', 'auto');
+      pPr.appendChild(spacing);
+
+      const rPr = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:rPr');
+      const rFonts = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:rFonts');
+      rFonts.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:ascii', 'Times New Roman');
+      rFonts.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:hAnsi', 'Times New Roman');
+      rFonts.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:cs', 'Times New Roman');
+      rPr.appendChild(rFonts);
+
+      const sz = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:sz');
+      sz.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:val', '24');
+      rPr.appendChild(sz);
+      const szCs = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:szCs');
+      szCs.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:val', '24');
+      rPr.appendChild(szCs);
+
+      if (isBold) {
+        const b = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:b');
+        rPr.appendChild(b);
+        const bCs = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:bCs');
+        rPr.appendChild(bCs);
+      }
+      pPr.appendChild(rPr);
+      p.appendChild(pPr);
+
+      const r = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:r');
+      r.appendChild(rPr.cloneNode(true));
+      const t = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:t');
+      t.textContent = rawText;
+      t.setAttribute('xml:space', 'preserve');
+      r.appendChild(t);
+      p.appendChild(r);
+
+      return p;
+    };
+
+    for (const item of insertedFindings) {
+      let rawText = '';
+      let isBold = false;
+      let afterNodeId: string | undefined;
+
+      if (typeof item === 'string') {
+        isBold = item.startsWith('BOLD::') || item.includes('BOLD::');
+        rawText = item.replace(/^BOLD::\s*/, '').trim();
+      } else if (item && typeof item === 'object') {
+        rawText = (item.text || '').replace(/^BOLD::\s*/, '').trim();
+        isBold = !!(item.bold || (item.text && item.text.startsWith('BOLD::')));
+        afterNodeId = item.after_node_id;
+      }
+
+      if (!rawText) continue;
+
+      const newP = createCleanBodyParagraph(rawText, isBold);
+
+      let anchorEl: Element | null = null;
+      if (afterNodeId && pMap.has(afterNodeId)) {
+        anchorEl = pMap.get(afterNodeId)!;
+      }
+
+      if (anchorEl && anchorEl.parentNode) {
+        // Check if anchorEl is followed by an empty spacer paragraph in the template
+        let next = anchorEl.nextSibling;
+        while (next && next.nodeType !== 1) next = next.nextSibling;
+        const nextIsBlank = next && ((next as Element).localName === 'p' || (next as Element).nodeName === 'w:p') && !getElementText(next as Element).trim();
+
+        // Create a matching spacer paragraph
+        const spacerP = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:p');
+        const spacerPPr = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:pPr');
+        const spacerSpacing = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:spacing');
+        spacerSpacing.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:after', '0');
+        spacerPPr.appendChild(spacerSpacing);
+        spacerP.appendChild(spacerPPr);
+
+        if (nextIsBlank && next) {
+          // Insert after the existing blank spacer, and append a trailing blank spacer
+          anchorEl.parentNode.insertBefore(newP, (next as Element).nextSibling);
+          anchorEl.parentNode.insertBefore(spacerP, newP.nextSibling);
         } else {
-          const newP = lastSlot.cloneNode(true) as Element;
-          const isNative = hasNativeBullet(newP);
-          const bulletText = isNative ? cleanBullet : `• ${cleanBullet}`;
-          const tTags = newP.getElementsByTagName('w:t');
-          if (tTags.length > 0) {
-            tTags[0].textContent = bulletText;
-            tTags[0].setAttribute('xml:space', 'preserve');
-            for (let j = 1; j < tTags.length; j++) tTags[j].textContent = '';
+          // Insert spacer before newP
+          anchorEl.parentNode.insertBefore(spacerP, anchorEl.nextSibling);
+          anchorEl.parentNode.insertBefore(newP, spacerP.nextSibling);
+        }
+      } else if (headerEl && headerEl.parentNode) {
+        const spacerP = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:p');
+        headerEl.parentNode.insertBefore(spacerP, headerEl);
+        headerEl.parentNode.insertBefore(newP, headerEl);
+      }
+    }
+  }
+
+  // 2. Apply Impression Bullets
+  if (impressionItems && impressionItems.length > 0) {
+    let headerEl: Element | null = null;
+    if (impressionHeaderId && pMap.has(impressionHeaderId)) {
+      headerEl = pMap.get(impressionHeaderId)!;
+    }
+    if (!headerEl) {
+      // Find IMPRESSION: or CONCLUSION: paragraph in DOM
+      pMap.forEach((el) => {
+        if (!headerEl) {
+          const t = getElementText(el).trim().toUpperCase();
+          if (t === 'IMPRESSION:' || t.startsWith('IMPRESSION:') || t === 'CONCLUSION:' || t.startsWith('CONCLUSION:')) {
+            headerEl = el;
           }
-          lastInserted.parentNode?.insertBefore(newP, lastInserted.nextSibling);
-          lastInserted = newP;
+        }
+      });
+    }
+
+    const slotElements = impressionSlotIds.map(id => pMap.get(id)).filter(Boolean) as Element[];
+
+    // 1. Detect if any template slot has native bullet list formatting (numPr / ListParagraph)
+    let masterNumPr: Element | null = null;
+    let masterPStyle: Element | null = null;
+    for (const p of slotElements) {
+      const pPr = p.getElementsByTagName('w:pPr')[0];
+      if (pPr) {
+        const numPr = pPr.getElementsByTagName('w:numPr')[0];
+        if (numPr && !masterNumPr) {
+          masterNumPr = numPr;
+        }
+        const pStyle = pPr.getElementsByTagName('w:pStyle')[0];
+        if (pStyle && !masterPStyle) {
+          const val = pStyle.getAttribute('w:val') || pStyle.getAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'val') || '';
+          if (val.toLowerCase().includes('list') || val.toLowerCase().includes('bullet')) {
+            masterPStyle = pStyle;
+          }
+        }
+      }
+    }
+
+    const formatBulletParagraph = (p: Element, rawBullet: string) => {
+      const cleanBullet = rawBullet.replace(/^BOLD::\s*/, '').replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim();
+
+      let pPr = p.getElementsByTagName('w:pPr')[0];
+      if (!pPr) {
+        pPr = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:pPr');
+        p.insertBefore(pPr, p.firstChild);
+      }
+
+      // Ensure bold on all runs in the impression bullet paragraph
+      const rTags = p.getElementsByTagName('w:r');
+      for (let r_i = 0; r_i < rTags.length; r_i++) {
+        let rPr = rTags[r_i].getElementsByTagName('w:rPr')[0];
+        if (!rPr) {
+          rPr = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:rPr');
+          rTags[r_i].insertBefore(rPr, rTags[r_i].firstChild);
+        }
+        let bTag = rPr.getElementsByTagName('w:b')[0];
+        if (!bTag) {
+          bTag = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:b');
+          rPr.appendChild(bTag);
+        }
+        let bCsTag = rPr.getElementsByTagName('w:bCs')[0];
+        if (!bCsTag) {
+          bCsTag = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:bCs');
+          rPr.appendChild(bCsTag);
         }
       }
 
-      for (let i = impressionItems.length; i < slotElements.length; i++) {
-        const p = slotElements[i];
+      if (masterNumPr || masterPStyle) {
+        // Uniform Native Word List formatting across all bullet paragraphs
+        let pStyle = pPr.getElementsByTagName('w:pStyle')[0];
+        if (!pStyle && masterPStyle) {
+          pPr.insertBefore(masterPStyle.cloneNode(true), pPr.firstChild);
+        } else if (!pStyle) {
+          pStyle = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:pStyle');
+          pStyle.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:val', 'ListParagraph');
+          pPr.insertBefore(pStyle, pPr.firstChild);
+        }
+
+        let numPr = pPr.getElementsByTagName('w:numPr')[0];
+        if (!numPr && masterNumPr) {
+          pPr.appendChild(masterNumPr.cloneNode(true));
+        }
+
+        // Native list renders bullet point natively; write pure text without bullet glyph
         const tTags = p.getElementsByTagName('w:t');
-        for (let j = 0; j < tTags.length; j++) {
-          tTags[j].textContent = '';
+        if (tTags.length > 0) {
+          tTags[0].textContent = cleanBullet;
+          tTags[0].setAttribute('xml:space', 'preserve');
+          for (let j = 1; j < tTags.length; j++) tTags[j].textContent = '';
+        }
+      } else {
+        // Uniform Manual Bullet with clean Hanging Indent (Left: 720 / Hanging: 360)
+        const oldNumPr = pPr.getElementsByTagName('w:numPr')[0];
+        if (oldNumPr) pPr.removeChild(oldNumPr);
+
+        let ind = pPr.getElementsByTagName('w:ind')[0];
+        if (!ind) {
+          ind = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:ind');
+          ind.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:left', '720');
+          ind.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:hanging', '360');
+          pPr.appendChild(ind);
+        } else {
+          ind.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:left', '720');
+          ind.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:hanging', '360');
+        }
+
+        const tTags = p.getElementsByTagName('w:t');
+        if (tTags.length > 0) {
+          tTags[0].textContent = `•  ${cleanBullet}`;
+          tTags[0].setAttribute('xml:space', 'preserve');
+          for (let j = 1; j < tTags.length; j++) tTags[j].textContent = '';
         }
       }
-    }
-  }
+    };
 
-    // 2.5. Zero-Drop Findings Reconciliation Guard:
-  // Verifies that every clinical finding in mutations was successfully written to the Word document DOM.
-  // If the AI omitted a node update or index shifted, this guard guarantees 100% placement!
-  if (mutations && mutations.length > 0) {
-    const updatedTexts = new Set<string>();
-    pMap.forEach((el) => {
-      const t = getElementText(el).trim();
-      if (t) updatedTexts.add(t);
-    });
+function cleanImpressionText(raw: string): string {
+  let s = raw.replace(/^BOLD::\s*/, '');
+  s = s.replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '');
+  s = s.replace(/^["'\s]+|["'\s]+$/g, '');
+  s = s.replace(/\[(?:raw findings|user query|citation)[^\]]*\]/gi, '').replace(/\s{2,}/g, ' ');
+  return s.trim();
+}
 
-    for (const mut of mutations) {
-      const clean = (mut.new_text || '').replace(/^BOLD::\s*/, '').trim();
-      if (!clean) continue;
-
-      let found = false;
-      for (const ut of updatedTexts) {
-        if (ut.includes(clean) || clean.includes(ut)) {
-          found = true;
-          break;
-        }
-      }
-
-      // If a dictated finding is missing from DOM, find the best matching baseline node and update it
-      if (!found) {
-        let bestTarget: Element | null = null;
-        let bestScore = 0;
-        pMap.forEach((el, key) => {
-          if (key.startsWith('node_') || key.startsWith('p_')) {
-            const currentT = getElementText(el).trim();
-            if (currentT && !currentT.toUpperCase().startsWith('IMPRESSION:')) {
-              // Word overlap score
-              const cWords = new Set(clean.toLowerCase().split(/\W+/).filter(w => w.length > 2));
-              const tWords = new Set(currentT.toLowerCase().split(/\W+/).filter(w => w.length > 2));
-              let overlap = 0;
-              cWords.forEach(w => { if (tWords.has(w)) overlap++; });
-              if (overlap > bestScore) {
-                bestScore = overlap;
-                bestTarget = el;
-              }
-            }
+    // Clean up old slot elements and any existing paragraphs after headerEl
+    if (headerEl && headerEl.parentNode) {
+      const parent = headerEl.parentNode;
+      const toRemove: Element[] = [];
+      let sib = headerEl.nextSibling;
+      while (sib) {
+        if (sib.nodeType === 1) {
+          const el = sib as Element;
+          if (el.localName === 'p' || el.nodeName === 'w:p') {
+            toRemove.push(el);
           }
-        });
+        }
+        sib = sib.nextSibling;
+      }
+      for (const el of toRemove) {
+        if (el.parentNode) {
+          el.parentNode.removeChild(el);
+        }
+      }
 
-        if (bestTarget) {
-          applyTextToParagraphRuns(bestTarget, clean, mut.bold);
+      let lastInserted: Element = headerEl;
+      for (let i = 0; i < impressionItems.length; i++) {
+        const rawItem = impressionItems[i];
+        const cleanBullet = cleanImpressionText(rawItem);
+        if (!cleanBullet) continue;
+        const u = cleanBullet.toUpperCase();
+        if (u === 'IMPRESSION:' || u === 'CONCLUSION:' || u === 'IMPRESSION' || u === 'CONCLUSION') continue;
+
+        const newP = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:p');
+        const newR = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:r');
+        const newRPr = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:rPr');
+        
+        const rFonts = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:rFonts');
+        rFonts.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:ascii', 'Times New Roman');
+        rFonts.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:hAnsi', 'Times New Roman');
+        rFonts.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:cs', 'Times New Roman');
+        newRPr.appendChild(rFonts);
+
+        const sz = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:sz');
+        sz.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:val', '24');
+        newRPr.appendChild(sz);
+        const szCs = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:szCs');
+        szCs.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:val', '24');
+        newRPr.appendChild(szCs);
+
+        // Always bold impression bullet text
+        const b = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:b');
+        newRPr.appendChild(b);
+        const bCs = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:bCs');
+        newRPr.appendChild(bCs);
+
+        newR.appendChild(newRPr);
+        const newT = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:t');
+        newR.appendChild(newT);
+        newP.appendChild(newR);
+
+        formatBulletParagraph(newP, cleanBullet);
+        parent.insertBefore(newP, lastInserted.nextSibling);
+        lastInserted = newP;
+      }
+    } else {
+      // If neither slot nor header exists, append IMPRESSION: header and bullets to w:body
+      const body = xmlDoc.getElementsByTagName('w:body')[0];
+      if (body) {
+        const sectPr = body.getElementsByTagName('w:sectPr')[0];
+        
+        const headP = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:p');
+        const headR = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:r');
+        const headRPr = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:rPr');
+        const headB = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:b');
+        const headU = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:u');
+        headU.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:val', 'single');
+        headRPr.appendChild(headB);
+        headRPr.appendChild(headU);
+        headR.appendChild(headRPr);
+        const headT = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:t');
+        headT.textContent = 'IMPRESSION:';
+        headR.appendChild(headT);
+        headP.appendChild(headR);
+
+        if (sectPr) {
+          body.insertBefore(headP, sectPr);
+        } else {
+          body.appendChild(headP);
+        }
+
+        let lastInserted: Element = headP;
+        for (let i = 0; i < impressionItems.length; i++) {
+          const cleanBullet = impressionItems[i].replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim();
+          const p = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:p');
+          const r = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:r');
+          const t = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:t');
+          t.textContent = cleanBullet;
+          t.setAttribute('xml:space', 'preserve');
+          r.appendChild(t);
+          p.appendChild(r);
+
+          formatBulletParagraph(p, cleanBullet);
+
+          if (sectPr) {
+            body.insertBefore(p, sectPr);
+          } else {
+            body.appendChild(p);
+          }
+          lastInserted = p;
         }
       }
     }
   }
+
 
   // 3. Serialize modified DOM back into DOCX zip
   const serializer = new XMLSerializer();
@@ -427,4 +701,243 @@ export async function applyAstMutationsToDocx(
   }
 
   return createZip(updatedEntries);
+}
+
+/**
+ * Surgically merges a structured findings array into a template DOCX using the Semantic AST engine.
+ * 100% deterministic, 0 API calls, 100% style/font/spacing preservation identical to AST auto-download.
+ */
+export async function mergeFindingsIntoDocxWithAstEngine(
+  templateBase64: string,
+  findings: string[]
+): Promise<Blob> {
+  const { ast, xmlDoc, zipEntries, pMap, cellMap, impressionHeaderId, impressionSlotIds } = await buildDocumentAstFromDocx(templateBase64);
+
+  // 1. Separate findings into Table Rows, Body Paragraphs, and Impression Items
+  const tableRowFindings: string[] = [];
+  const paragraphFindings: string[] = [];
+  const impressionItems: string[] = [];
+  let isInImpression = false;
+
+  const titleNode = ast.find(n => n.type === 'title');
+  const templateTitleNormalized = (titleNode?.current_text || ast[0]?.current_text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+
+  for (let fIdx = 0; fIdx < findings.length; fIdx++) {
+    const f = findings[fIdx];
+    let trimmed = (f || '').trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('+-') || trimmed.startsWith('|-') || trimmed.startsWith('+=')) continue;
+    if (trimmed.toLowerCase().startsWith('title:')) continue;
+
+    const normalizedF = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    // Skip the document Title line from body findings
+    if (fIdx === 0 && (!trimmed.includes(':') || (templateTitleNormalized && normalizedF === templateTitleNormalized))) {
+      continue;
+    }
+    if (templateTitleNormalized && normalizedF === templateTitleNormalized) {
+      continue;
+    }
+
+    if (trimmed.toUpperCase() === 'IMPRESSION:' || trimmed.toUpperCase().startsWith('IMPRESSION:') || trimmed.toUpperCase() === 'CONCLUSION:' || trimmed.toUpperCase().startsWith('CONCLUSION:')) {
+      isInImpression = true;
+      if (trimmed.includes('###')) {
+        const parts = trimmed.split('###').slice(1);
+        for (const p of parts) {
+          const cleanP = cleanImpressionText(p);
+          const u = cleanP.toUpperCase();
+          if (cleanP && u !== 'IMPRESSION:' && u !== 'CONCLUSION:' && u !== 'IMPRESSION' && u !== 'CONCLUSION') {
+            impressionItems.push(cleanP);
+          }
+        }
+      }
+      continue;
+    }
+
+    if (isInImpression) {
+      const cleanP = cleanImpressionText(trimmed);
+      const u = cleanP.toUpperCase();
+      if (cleanP && u !== 'IMPRESSION:' && u !== 'CONCLUSION:' && u !== 'IMPRESSION' && u !== 'CONCLUSION') {
+        impressionItems.push(cleanP);
+      }
+      continue;
+    }
+
+    if (trimmed.includes('|')) {
+      tableRowFindings.push(trimmed);
+    } else {
+      paragraphFindings.push(trimmed);
+    }
+  }
+
+  const mutations: AstMutation[] = [];
+  const usedNodeIds = new Set<string>();
+
+  // A. Process Table Row Findings against table_cell nodes
+  const tableCellNodes = ast.filter(n => n.type === 'table_cell');
+  for (const rowStr of tableRowFindings) {
+    const cols = rowStr.split('|').map(c => c.replace(/^BOLD::\s*/, '').trim());
+    if (cols.length < 2) continue;
+    const rowKey = cols[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!rowKey) continue;
+
+    // Match table cells whose row_label matches rowKey
+    for (const cell of tableCellNodes) {
+      const cellRowLabel = (cell.row_label || cell.current_text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (cellRowLabel === rowKey) {
+        // e.g. cell.id is 'tbl_0_r_1_c_1' -> get column index from cell.id
+        const cMatch = cell.id.match(/_c_(\d+)$/);
+        if (cMatch) {
+          const colIdx = parseInt(cMatch[1], 10);
+          if (colIdx >= 1 && colIdx < cols.length) {
+            const targetVal = cols[colIdx];
+            if (targetVal !== undefined && targetVal !== '') {
+              usedNodeIds.add(cell.id);
+              mutations.push({
+                node_id: cell.id,
+                new_text: targetVal,
+                bold: rowStr.includes('BOLD::')
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // B. Process Paragraph Findings against paragraph nodes (NEVER table cells)
+  const paragraphNodes = ast.filter(n => n.type !== 'table_cell' && n.type !== 'impression_header' && n.type !== 'impression_item' && n.type !== 'title');
+  let lastMatchedNodeId: string | undefined;
+  const insertions: AstInsertion[] = [];
+
+function extractMedicalKeywords(text: string): Set<string> {
+  const stopWords = new Set([
+    'and', 'the', 'for', 'with', 'are', 'is', 'not', 'any', 'been', 'seen',
+    'from', 'both', 'show', 'shows', 'appear', 'appears', 'within', 'limits',
+    'rest', 'other', 'normal', 'abnormality', 'signal', 'intensity', 'characteristics',
+    'features', 'study', 'noted', 'no', 'of', 'in', 'at'
+  ]);
+  let t = text.toLowerCase();
+  t = t.replace(/\bsacroiliac\b/g, 'si');
+  t = t.replace(/\bsacro-iliac\b/g, 'si');
+  t = t.replace(/\blumbosacral\b/g, 'lumbar');
+  t = t.replace(/\bventricles\b/g, 'ventricular');
+  t = t.replace(/\bhydrocephalus\b/g, 'ventricular');
+  t = t.replace(/\binfarction\b/g, 'infarct');
+  t = t.replace(/\bischemia\b/g, 'infarct');
+  t = t.replace(/\bjoints\b/g, 'joint');
+  t = t.replace(/\bbones\b/g, 'bone');
+  t = t.replace(/\bmuscles\b/g, 'muscle');
+  t = t.replace(/\btendons\b/g, 'tendon');
+  t = t.replace(/\borgans\b/g, 'organ');
+
+  const rawWords = t.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length >= 2 && !stopWords.has(w));
+  return new Set(rawWords);
+}
+
+  let activeReportSection = 'header';
+
+  // Pass 1: Exact / Colon-Key / Word Overlap Matching
+  for (const finding of paragraphFindings) {
+    const isBold = finding.startsWith('BOLD::') || finding.includes('BOLD::');
+    const cleanFinding = finding.replace(/^BOLD::\s*/, '').trim();
+    const isHeading = cleanFinding.endsWith(':');
+    if (isHeading) {
+      activeReportSection = cleanFinding.toLowerCase().replace(/[^a-z0-9]/g, '');
+    }
+    const fWords = extractMedicalKeywords(cleanFinding);
+
+    let bestScore = 0.0;
+    let bestNodeId: string | null = null;
+
+    const fColon = cleanFinding.includes(':') ? cleanFinding.split(':', 2)[0].trim().toLowerCase().replace(/[^a-zA-Z0-9]/g, '') : null;
+
+    for (const node of paragraphNodes) {
+      if (usedNodeIds.has(node.id)) continue;
+
+      const nText = node.current_text.trim();
+      if (!nText) continue;
+      const isNodeHeading = node.type === 'section_heading' || nText.endsWith(':');
+
+      // Section Isolation: Narrative findings inside a section cannot match nodes in previous/other sections
+      if (activeReportSection !== 'header' && node.section && node.section !== 'header' && node.section !== activeReportSection) {
+        continue;
+      }
+
+      // 1. Colon match (e.g. "L1-L2:", "Ventricular System:", "Clinical Profile:")
+      if (fColon && nText.includes(':')) {
+        const nColon = nText.split(':', 2)[0].trim().toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+        if (fColon === nColon && fColon.length > 0) {
+          bestScore = 100.0;
+          bestNodeId = node.id;
+          break;
+        }
+      }
+
+      // Do not match narrative findings onto section headings via word overlap
+      if (!isHeading && isNodeHeading) continue;
+      // Do not match section headings onto narrative nodes
+      if (isHeading && !isNodeHeading) continue;
+
+      // 2. Exact match
+      if (cleanFinding.toLowerCase() === nText.toLowerCase()) {
+        bestScore = 90.0;
+        bestNodeId = node.id;
+        break;
+      }
+
+      // 3. Medical Keyword Coverage match (e.g. "Right SI joint sclerosis", "Sacroiliac narrowing" vs "SI joints and pubic symphysis appears normal")
+      const nWords = extractMedicalKeywords(nText);
+      let overlap = 0;
+      fWords.forEach(w => { if (nWords.has(w)) overlap++; });
+      if (nWords.size > 0 && overlap > 0) {
+        const coverage = overlap / nWords.size;
+        if ((coverage >= 0.40 || overlap >= 2) && coverage > bestScore) {
+          bestScore = coverage;
+          bestNodeId = node.id;
+        }
+      }
+
+      // 4. Word overlap similarity (strict threshold to avoid cross-concept collisions)
+      const union = fWords.size + nWords.size - overlap;
+      const score = union > 0 && overlap > 0 ? overlap / union : 0;
+
+      if (score > bestScore && score >= 0.35) {
+        bestScore = score;
+        bestNodeId = node.id;
+      }
+    }
+
+    if (bestNodeId) {
+      usedNodeIds.add(bestNodeId);
+      lastMatchedNodeId = bestNodeId;
+      mutations.push({
+        node_id: bestNodeId,
+        new_text: finding,
+        bold: isBold
+      });
+    } else {
+      // Clean incidental finding insertion at its exact sequential position in report
+      insertions.push({
+        after_node_id: lastMatchedNodeId,
+        text: finding,
+        bold: isBold
+      });
+    }
+  }
+
+  return applyAstMutationsToDocx(
+    xmlDoc,
+    zipEntries,
+    pMap,
+    cellMap,
+    mutations,
+    impressionItems,
+    impressionSlotIds,
+    impressionHeaderId,
+    insertions
+  );
 }
