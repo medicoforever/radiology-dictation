@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ChatInterface from './ChatInterface';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
-import { continueAudioDictation, modifyFindingWithAudio, modifyReportWithAudio, modifyReportWithText, runComplexImpressionGeneration, transcribeAudioForPrompt, mergeFindingsWithAst } from '../services/geminiService';
+import { continueAudioDictation, modifyFindingWithAudio, modifyReportWithAudio, modifyReportWithText, runComplexImpressionGeneration, transcribeAudioForPrompt } from '../services/geminiService';
 import Spinner from './ui/Spinner';
 import PencilIcon from './icons/PencilIcon';
 import MicPlusIcon from './icons/MicPlusIcon';
@@ -20,10 +20,7 @@ import BrainIcon from './icons/BrainIcon';
 import MicIcon from './icons/MicIcon';
 import DownloadIcon from './icons/DownloadIcon';
 import TrashIcon from './icons/TrashIcon';
-import { mergeFindingsIntoDocx, downloadDocxBlob } from '../services/docxService';
-import { RADIOLOGY_TEMPLATES_CATALOG } from '../services/templateCatalog';
-import { SelectedTemplateData } from './ui/TemplateSelectionModal';
-import { isTemplateSkillEnabled, getTemplateCustomPrompt } from '../services/templateStorage';
+
 
 
 interface ChatMessage {
@@ -57,10 +54,6 @@ interface ResultsDisplayProps {
   onResumeLive?: () => void;
   identifiedErrors?: IdentifiedError[];
   errorCheckStatus?: 'idle' | 'checking' | 'complete';
-  selectedTemplate?: SelectedTemplateData | null;
-  onSelectTemplate?: (template: SelectedTemplateData) => void;
-  docxBlob?: Blob | null;
-  onDocxBlobChange?: (blob: Blob | null) => void;
 }
 
 const parseStructuredFinding = (finding: string) => {
@@ -107,11 +100,7 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
   onPauseLive,
   onResumeLive,
   identifiedErrors = [],
-  errorCheckStatus = 'idle',
-  selectedTemplate = null,
-  onSelectTemplate,
-  docxBlob = null,
-  onDocxBlobChange,
+  errorCheckStatus = 'idle'
 }) => {
   const [isAllCopied, setIsAllCopied] = useState<boolean>(false);
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set<number>());
@@ -323,8 +312,8 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
         acc.html.push(`<strong>${snippet}</strong>`);
       } else {
         const finding = findings[i];
-        const isBold = finding.includes('BOLD::');
-        const cleanFinding = finding.replace(/BOLD::/g, '');
+        const isBold = finding.startsWith('BOLD::');
+        const cleanFinding = isBold ? finding.substring(6) : finding;
         const isTitle = cleanFinding.trim() === 'C.T.SCAN OF BRAIN (PLAIN)';
         const { isStructured, title, points } = parseStructuredFinding(cleanFinding);
         const isImpression = isStructured && title.trim().toUpperCase() === 'IMPRESSION:';
@@ -334,7 +323,7 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
           acc.plain.push(cleanFinding);
           acc.html.push(`<p style="text-align:center;"><strong><u>${cleanFinding}</u></strong></p>`);
         } else if (isImpression) {
-            acc.plain.push(`${title.toUpperCase()}\n${points.map(p => `• ${p}`).join('\n')}`);
+            acc.plain.push(`${title.toUpperCase()}\n${points.map(p => `. ${p}`).join('\n')}`);
             acc.html.push(`<p><strong style="text-decoration: underline;">${title.toUpperCase()}</strong></p><ul>${points.map(p => `<li><strong>${p}</strong></li>`).join('')}</ul>`);
         } else if (isStructured) {
           acc.plain.push([title, ...points].join('\n'));
@@ -420,8 +409,8 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
     
     // Single-copy logic
     const findingToCopy = findings[index];
-    const isBold = findingToCopy.includes('BOLD::');
-    const cleanFinding = findingToCopy.replace(/BOLD::/g, '');
+    const isBold = findingToCopy.startsWith('BOLD::');
+    const cleanFinding = isBold ? findingToCopy.substring(6) : findingToCopy;
     const isTitle = cleanFinding.trim() === 'C.T.SCAN OF BRAIN (PLAIN)';
     const { isStructured, title, points } = parseStructuredFinding(cleanFinding);
     const isImpression = isStructured && title.trim().toUpperCase() === 'IMPRESSION:';
@@ -434,7 +423,7 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
       plainText = cleanFinding;
       htmlText = `<p style="text-align:center;"><strong><u>${cleanFinding}</u></strong></p>`;
     } else if (isImpression) {
-        plainText = `${title.toUpperCase()}\n${points.map(p => `• ${p}`).join('\n')}`;
+        plainText = `${title.toUpperCase()}\n${points.map(p => `. ${p}`).join('\n')}`;
         htmlText = `<p><strong style="text-decoration: underline;">${title.toUpperCase()}</strong></p><ul>${points.map(p => `<li><strong>${p}</strong></li>`).join('')}</ul>`;
     } else if (isStructured) {
         plainText = [title, ...points].join('\n');
@@ -475,13 +464,13 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
     if (!findings || findings.length === 0) return;
     
     const allTextPlain = findings.map(f => {
-      const isBold = f.includes('BOLD::');
-      const cleanFinding = f.replace(/BOLD::/g, '');
+      const isBold = f.startsWith('BOLD::');
+      const cleanFinding = isBold ? f.substring(6) : f;
       const { isStructured, title, points } = parseStructuredFinding(cleanFinding);
       const isImpression = isStructured && title.trim().toUpperCase() === 'IMPRESSION:';
 
       if (isImpression) {
-          return `${title.toUpperCase()}\n${points.map(p => `• ${p}`).join('\n')}`;
+          return `${title.toUpperCase()}\n${points.map(p => `. ${p}`).join('\n')}`;
       }
       if (isStructured) {
         return [title, ...points].join('\n');
@@ -493,8 +482,8 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
     }).join('\n\n');
 
     const allTextHtml = findings.map(f => {
-      const isBold = f.includes('BOLD::');
-      const cleanFinding = f.replace(/BOLD::/g, '');
+      const isBold = f.startsWith('BOLD::');
+      const cleanFinding = isBold ? f.substring(6) : f;
       const isTitle = cleanFinding.trim() === 'C.T.SCAN OF BRAIN (PLAIN)';
       const { isStructured, title, points } = parseStructuredFinding(cleanFinding);
       const isImpression = isStructured && title.trim().toUpperCase() === 'IMPRESSION:';
@@ -569,36 +558,14 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
     }
   };
 
-  const handleDownloadDocx = async () => {
-    if (!findings || findings.length === 0) {
-      showNotification('No findings available to download as Word DOCX.');
-      return;
-    }
-    try {
-      const title = selectedTemplate?.name || findings[0] || 'Radiology_Report';
-      const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-      const templateBase64 = selectedTemplate?.docxBase64;
-
-      const blob = (docxBlob instanceof Blob && docxBlob.size > 0)
-        ? docxBlob
-        : await mergeFindingsIntoDocx(templateBase64, findings, title);
-
-      downloadDocxBlob(blob, cleanFileName);
-      showNotification('Downloaded Word DOCX report (Times New Roman 12pt)!');
-    } catch (err) {
-      console.error('Failed to generate or download DOCX:', err);
-      showNotification('Failed to generate DOCX file.');
-    }
-  };
-
   // --- Edit Mode Handlers ---
   const handleStartEdit = (index: number) => {
     setUndoState(null);
     setEditingIndex(index);
 
     const findingToEdit = findings[index];
-    const isBold = findingToEdit.includes('BOLD::');
-    const cleanFinding = findingToEdit.replace(/BOLD::/g, '');
+    const isBold = findingToEdit.startsWith('BOLD::');
+    const cleanFinding = isBold ? findingToEdit.substring(6) : findingToEdit;
     
     const { isStructured, title, points } = parseStructuredFinding(cleanFinding);
     const textForEditing = isStructured ? [title, ...points].join('\n') : cleanFinding;
@@ -780,16 +747,25 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
   };
 
   const handleApplyTextModification = async () => {
-      if (!modificationText.trim()) return;
+      const text = modificationText.trim();
+      if (!text) return;
+
       setUndoState(findings);
       setModificationState('processing');
       setModificationError(null);
+
       try {
-          const newFindings = await modifyReportWithText(findings, modificationText.trim(), selectedModel, customPrompt, customImages);
+          const newFindings = await modifyReportWithText(
+              findings,
+              text,
+              selectedModel,
+              customPrompt,
+              customImages
+          );
           onAllFindingsUpdate(newFindings);
           setModificationText('');
           setModificationState('idle');
-      } catch (err) {
+      } catch (err: any) {
           const message = err instanceof Error ? err.message : 'An unknown error occurred.';
           setModificationError(message);
           setModificationState('idle');
@@ -945,9 +921,8 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
     setUndoState([...findings]);
     const updated = findings.filter((_, i) => i !== indexToDelete);
     onAllFindingsUpdate(updated);
-    if (editingIndex === indexToDelete) {
-      setEditingIndex(null);
-      setEditingText('');
+    if (editingState?.index === indexToDelete) {
+      setEditingState(null);
     }
   };
 
@@ -967,8 +942,16 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
   );
 
 
+  const handleScrollToMainPlace = () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    const el = document.getElementById('single-dictation-main-top');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
   return (
-    <div className="p-4">
+    <div id="single-dictation-main-top" className="p-4">
       {multiSelectMode && (
           <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 bg-slate-800 text-white rounded-full shadow-lg flex items-center gap-4 px-5 py-2 transition-all duration-300 ease-in-out">
             <p className="text-sm font-semibold">Multi-select Mode</p>
@@ -1044,7 +1027,6 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                 className="bg-white border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 w-full dark:bg-slate-700 dark:border-slate-600 dark:text-white"
                 aria-label="Select AI model for reprocessing"
             >
-                <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro</option>
                 <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
                 <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                 <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
@@ -1123,8 +1105,8 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
         {findings.map((finding, index) => {
           if (!finding && index === findings.length - 1) return null; // Don't render the trailing empty string from split
           
-          const isBold = finding.includes('BOLD::');
-          const cleanFinding = finding.replace(/BOLD::/g, '');
+          const isBold = finding.startsWith('BOLD::');
+          const cleanFinding = isBold ? finding.substring(6) : finding;
           const isTitle = cleanFinding.trim() === 'C.T.SCAN OF BRAIN (PLAIN)';
           const { isStructured, title, points } = parseStructuredFinding(cleanFinding);
           const isItalic = !isStructured && cleanFinding.startsWith('*') && cleanFinding.endsWith('*');
@@ -1340,7 +1322,7 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
             <div className="flex-grow">
                 <h4 className="font-bold text-slate-800 dark:text-slate-100">Dictate or Type Report Changes</h4>
                 <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
-                    Dictate with voice or type instructions to modify the entire report (e.g. <em>'remove measurements'</em>, <em>'make impression concise'</em>, <em>'change finding #2 to normal'</em>).
+                    Dictate with voice or type instructions to modify the entire report (e.g. <em>'remove measurements'</em>, <em>'rephrase impression'</em>).
                 </p>
             </div>
             <div className="sm:ml-4 flex-shrink-0 w-full sm:w-auto flex items-center gap-2">
@@ -1374,34 +1356,34 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
             </div>
         </div>
 
-        {/* Text Instruction Input for Changes */}
+        {/* Typed Instruction Input */}
         <div className="pt-2 border-t border-slate-200 dark:border-slate-700/60 flex items-center gap-2">
             <input
-              type="text"
-              value={modificationText}
-              onChange={(e) => setModificationText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && modificationText.trim() && modificationState !== 'processing') {
-                  e.preventDefault();
-                  handleApplyTextModification();
-                }
-              }}
-              placeholder="Or type change instructions here (e.g. 'remove all measurements', 'make impression bulleted')..."
-              disabled={modificationState === 'processing'}
-              className="flex-1 p-2.5 text-xs sm:text-sm border border-slate-300 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none disabled:opacity-60"
+                type="text"
+                value={modificationText}
+                onChange={(e) => setModificationText(e.target.value)}
+                onKeyDown={(e) => {
+                    if (e.key === 'Enter' && modificationText.trim() && modificationState !== 'processing') {
+                        e.preventDefault();
+                        handleApplyTextModification();
+                    }
+                }}
+                placeholder="Or type change instructions (e.g. 'remove measurements', 'add follow-up suggestion')..."
+                disabled={modificationState === 'processing'}
+                className="flex-1 p-2.5 text-xs sm:text-sm border border-slate-300 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none"
             />
             <button
-              onClick={handleApplyTextModification}
-              disabled={!modificationText.trim() || modificationState === 'processing'}
-              className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:hover:bg-blue-600 text-white text-xs sm:text-sm font-bold shadow transition-all flex items-center gap-1.5 flex-shrink-0"
-              title="Apply typed change instructions"
+                onClick={handleApplyTextModification}
+                disabled={!modificationText.trim() || modificationState === 'processing'}
+                className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-xs sm:text-sm font-bold shadow transition-all flex items-center gap-1.5 flex-shrink-0"
+                title="Apply typed changes"
             >
-              {modificationState === 'processing' ? (
-                <Spinner className="w-4 h-4" />
-              ) : (
-                <SendIcon className="w-4 h-4" />
-              )}
-              <span>Send</span>
+                {modificationState === 'processing' ? (
+                    <Spinner className="w-4 h-4" />
+                ) : (
+                    <SendIcon className="w-4 h-4" />
+                )}
+                <span>Send</span>
             </button>
         </div>
 
@@ -1486,6 +1468,13 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
         ) : continuationState.status === 'idle' ? (
           <>
             <button
+              onClick={handleScrollToMainPlace}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-lg hover:shadow-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-opacity-50 transition-all w-full sm:w-auto flex items-center justify-center gap-2 shadow"
+              title="Move to main place (Top) for next dictation"
+            >
+              <span>? Move to Main Place / Top</span>
+            </button>
+            <button
               onClick={handleRecordNew}
               className="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition-colors w-full sm:w-auto"
             >
@@ -1527,22 +1516,11 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
             >
               Download Audio
             </button>
-            {selectedTemplate && (
-              <button
-                onClick={handleDownloadDocx}
-                disabled={!findings || findings.length === 0}
-                className="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed w-full sm:w-auto flex items-center justify-center gap-1.5 shadow-md"
-              >
-                <DownloadIcon className="w-5 h-5" />
-                Download Merged Report (.docx)
-              </button>
-            )}
             <button
               onClick={handleDownloadHTML}
               disabled={!findings || findings.length === 0}
-              className="bg-green-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50 transition-colors disabled:bg-green-300 disabled:cursor-not-allowed w-full sm:w-auto flex items-center justify-center gap-1.5"
+              className="bg-green-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50 transition-colors disabled:bg-green-300 disabled:cursor-not-allowed w-full sm:w-auto"
             >
-              <DownloadIcon className="w-5 h-5" />
               Download as HTML
             </button>
           </>
@@ -1572,6 +1550,19 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
       </div>
       {continuationState.error && (
         <p className="text-center text-red-500 dark:text-red-400 mt-4" role="alert">{continuationState.error}</p>
+      )}
+
+      {/* Floating Move to Main Place Button */}
+      {findings && findings.length > 0 && (
+        <button
+          type="button"
+          onClick={handleScrollToMainPlace}
+          className="fixed bottom-6 right-6 z-40 p-3 px-4 rounded-full bg-blue-600 hover:bg-blue-700 text-white shadow-2xl border-2 border-white dark:border-slate-800 transition-all flex items-center gap-2 text-xs font-extrabold hover:scale-105"
+          title="Move to Main Place / Top"
+        >
+          <span className="text-base leading-none font-black">?</span>
+          <span className="tracking-wide">Main Place</span>
+        </button>
       )}
     </div>
   );
