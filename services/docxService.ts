@@ -1,3 +1,5 @@
+import { mergeFindingsIntoDocxWithAstEngine } from './docxAstService';
+
 export interface ZipEntry {
   name: string;
   data: Uint8Array;
@@ -384,7 +386,16 @@ export async function mergeFindingsIntoDocx(
     return generateDocxFromFindings([], examTitle);
   }
 
-  // If a native template DOCX exists, surgically replace matching paragraphs in-place preserving 100% of native styles
+  // 1. Primary High-Fidelity AST-DOM Engine (100% identical styling/font/spacing to AST auto-download)
+  if (templateBase64 && templateBase64.trim()) {
+    try {
+      return await mergeFindingsIntoDocxWithAstEngine(templateBase64, findings);
+    } catch (astErr) {
+      console.warn('mergeFindingsIntoDocx AST engine fallback:', astErr);
+    }
+  }
+
+  // 2. Secondary Universal In-Place Matcher Fallback
   if (templateBase64 && templateBase64.trim()) {
     try {
       const templateBytes = base64ToUint8Array(templateBase64);
@@ -470,7 +481,14 @@ export async function mergeFindingsIntoDocx(
           }
 
           const applyTextToParagraph = (p: Element, text: string, isBold: boolean) => {
-            const tTags = p.getElementsByTagName('w:t');
+            let tTags = p.getElementsByTagName('w:t');
+            if (tTags.length === 0) {
+              const newRun = xmlDoc.createElementNS(W_NS, 'w:r');
+              const newT = xmlDoc.createElementNS(W_NS, 'w:t');
+              newRun.appendChild(newT);
+              p.appendChild(newRun);
+              tTags = p.getElementsByTagName('w:t');
+            }
             if (tTags.length > 0) {
               tTags[0].textContent = text;
               tTags[0].setAttribute('xml:space', 'preserve');
@@ -511,7 +529,11 @@ export async function mergeFindingsIntoDocx(
               const pt = pTexts[i];
               if (!pt) continue;
 
-              const score = computeParagraphSimilarity(fWords, pWordsList[i], cleanVal, pt);
+              let score = computeParagraphSimilarity(fWords, pWordsList[i], cleanVal, pt);
+              // Direct percentage/score matching (e.g. "15 %" replacing "0 %" in score boxes)
+              if (cleanVal.includes('%') && pt.includes('%')) {
+                score = 0.95;
+              }
               if (score > bestScore) {
                 bestScore = score;
                 bestIdx = i;
@@ -603,30 +625,45 @@ export async function mergeFindingsIntoDocx(
             };
 
             for (let i = 0; i < impressionItems.length; i++) {
-              const cleanBullet = impressionItems[i].replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim();
+              const rawB = impressionItems[i];
+              const cleanBullet = rawB.replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim();
+              const isRec = /\b(suggested|advised|clinical correlation|please correlate)\b/i.test(cleanBullet);
+              const bulletText = isRec ? cleanBullet : `•\t${cleanBullet}`;
+
+              let p: Element;
               if (i < postImpressionSlots.length) {
-                const p = postImpressionSlots[i];
-                const isNative = hasNativeBullet(p);
-                const bulletText = isNative ? cleanBullet : `•  ${cleanBullet}`;
-                const tTags = p.getElementsByTagName('w:t');
-                if (tTags.length > 0) {
-                  tTags[0].textContent = bulletText;
-                  tTags[0].setAttribute('xml:space', 'preserve');
-                  for (let k = 1; k < tTags.length; k++) tTags[k].textContent = '';
-                }
+                p = postImpressionSlots[i];
               } else {
                 const lastSlot = postImpressionSlots[postImpressionSlots.length - 1] || allP[impIdx];
-                const newP = lastSlot.cloneNode(true) as Element;
-                const isNative = hasNativeBullet(newP);
-                const bulletText = isNative ? cleanBullet : `•  ${cleanBullet}`;
-                const tTags = newP.getElementsByTagName('w:t');
-                if (tTags.length > 0) {
-                  tTags[0].textContent = bulletText;
-                  tTags[0].setAttribute('xml:space', 'preserve');
-                  for (let k = 1; k < tTags.length; k++) tTags[k].textContent = '';
+                p = lastSlot.cloneNode(true) as Element;
+                lastSlot.parentNode?.insertBefore(p, lastSlot.nextSibling);
+                postImpressionSlots.push(p);
+              }
+
+              let pPr = p.getElementsByTagName('w:pPr')[0];
+              if (!pPr) {
+                pPr = xmlDoc.createElementNS(W_NS, 'w:pPr');
+                p.insertBefore(pPr, p.firstChild);
+              }
+              let ind = pPr.getElementsByTagName('w:ind')[0];
+              if (!ind && !isRec) {
+                ind = xmlDoc.createElementNS(W_NS, 'w:ind');
+                pPr.appendChild(ind);
+              }
+              if (ind) {
+                if (isRec) {
+                  pPr.removeChild(ind);
+                } else {
+                  ind.setAttributeNS(W_NS, 'w:left', '360');
+                  ind.setAttributeNS(W_NS, 'w:hanging', '360');
                 }
-                lastSlot.parentNode?.insertBefore(newP, lastSlot.nextSibling);
-                postImpressionSlots.push(newP);
+              }
+
+              const tTags = p.getElementsByTagName('w:t');
+              if (tTags.length > 0) {
+                tTags[0].textContent = bulletText;
+                tTags[0].setAttribute('xml:space', 'preserve');
+                for (let k = 1; k < tTags.length; k++) tTags[k].textContent = '';
               }
             }
 
@@ -699,23 +736,12 @@ export async function extractTextFromDocxBlob(blob: Blob): Promise<string> {
   }
 }
 
-export async function extractLinesFromDocxBlob(blob: Blob): Promise<{ lines: string[]; docxBase64: string }> {
+export async function extractLinesFromDocxBlob(blob: Blob): Promise<string[]> {
   try {
     const arrayBuffer = await blob.arrayBuffer();
-
-    // Convert ArrayBuffer to base64
-    let binary = '';
-    const bytes = new Uint8Array(arrayBuffer);
-    const chunkSize = 8192;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-      binary += String.fromCharCode.apply(null, chunk as any);
-    }
-    const docxBase64 = btoa(binary);
-
     const entries = await parseZip(arrayBuffer);
     const docEntry = entries.get('word/document.xml');
-    if (!docEntry) return { lines: [], docxBase64 };
+    if (!docEntry) return [];
     const xmlStr = new TextDecoder('utf-8').decode(docEntry.data);
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlStr, 'application/xml');
@@ -729,9 +755,9 @@ export async function extractLinesFromDocxBlob(blob: Blob): Promise<{ lines: str
       }
       if (line.trim()) lines.push(line.trim());
     }
-    return { lines, docxBase64 };
+    return lines;
   } catch (e) {
     console.warn('extractLinesFromDocxBlob error:', e);
-    return { lines: [], docxBase64: '' };
+    return [];
   }
 }
