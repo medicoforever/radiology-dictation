@@ -1,5 +1,3 @@
-import { mergeFindingsIntoDocxWithAstEngine } from './docxAstService';
-
 export interface ZipEntry {
   name: string;
   data: Uint8Array;
@@ -252,12 +250,6 @@ export function generateDocxFromFindings(
             paragraphXmls.push(buildParagraphXml(buildRunXml(`•  ${cleanP}`, true, false, false)));
           }
         }
-      } else {
-        // Fallback: extract text after "IMPRESSION:" / "CONCLUSION:" directly
-        const textAfter = raw.replace(/^(IMPRESSION|CONCLUSION):\s*(BOLD::)?\s*/i, '').trim();
-        if (textAfter) {
-          paragraphXmls.push(buildParagraphXml(buildRunXml(`•  ${textAfter}`, true, false, false)));
-        }
       }
       continue;
     }
@@ -392,16 +384,7 @@ export async function mergeFindingsIntoDocx(
     return generateDocxFromFindings([], examTitle);
   }
 
-  // 1. Primary High-Fidelity AST-DOM Engine (100% identical styling/font/spacing to AST auto-download)
-  if (templateBase64 && templateBase64.trim()) {
-    try {
-      return await mergeFindingsIntoDocxWithAstEngine(templateBase64, findings);
-    } catch (astErr) {
-      console.warn('mergeFindingsIntoDocx AST engine fallback:', astErr);
-    }
-  }
-
-  // 2. Secondary Universal In-Place Matcher Fallback
+  // If a native template DOCX exists, surgically replace matching paragraphs in-place preserving 100% of native styles
   if (templateBase64 && templateBase64.trim()) {
     try {
       const templateBytes = base64ToUint8Array(templateBase64);
@@ -447,10 +430,6 @@ export async function mergeFindingsIntoDocx(
                   const cleanP = p.replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim();
                   if (cleanP) impressionItems.push(cleanP);
                 }
-              } else {
-                // Fallback: extract text after "IMPRESSION:" / "CONCLUSION:" directly
-                const textAfter = trimmed.replace(/^(IMPRESSION|CONCLUSION):\s*(BOLD::)?\s*/i, '').trim();
-                if (textAfter) impressionItems.push(textAfter);
               }
               continue;
             }
@@ -491,14 +470,7 @@ export async function mergeFindingsIntoDocx(
           }
 
           const applyTextToParagraph = (p: Element, text: string, isBold: boolean) => {
-            let tTags = p.getElementsByTagName('w:t');
-            if (tTags.length === 0) {
-              const newRun = xmlDoc.createElementNS(W_NS, 'w:r');
-              const newT = xmlDoc.createElementNS(W_NS, 'w:t');
-              newRun.appendChild(newT);
-              p.appendChild(newRun);
-              tTags = p.getElementsByTagName('w:t');
-            }
+            const tTags = p.getElementsByTagName('w:t');
             if (tTags.length > 0) {
               tTags[0].textContent = text;
               tTags[0].setAttribute('xml:space', 'preserve');
@@ -539,11 +511,7 @@ export async function mergeFindingsIntoDocx(
               const pt = pTexts[i];
               if (!pt) continue;
 
-              let score = computeParagraphSimilarity(fWords, pWordsList[i], cleanVal, pt);
-              // Direct percentage/score matching (e.g. "15 %" replacing "0 %" in score boxes)
-              if (cleanVal.includes('%') && pt.includes('%')) {
-                score = 0.95;
-              }
+              const score = computeParagraphSimilarity(fWords, pWordsList[i], cleanVal, pt);
               if (score > bestScore) {
                 bestScore = score;
                 bestIdx = i;
@@ -731,12 +699,23 @@ export async function extractTextFromDocxBlob(blob: Blob): Promise<string> {
   }
 }
 
-export async function extractLinesFromDocxBlob(blob: Blob): Promise<string[]> {
+export async function extractLinesFromDocxBlob(blob: Blob): Promise<{ lines: string[]; docxBase64: string }> {
   try {
     const arrayBuffer = await blob.arrayBuffer();
+
+    // Convert ArrayBuffer to base64
+    let binary = '';
+    const bytes = new Uint8Array(arrayBuffer);
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+      binary += String.fromCharCode.apply(null, chunk as any);
+    }
+    const docxBase64 = btoa(binary);
+
     const entries = await parseZip(arrayBuffer);
     const docEntry = entries.get('word/document.xml');
-    if (!docEntry) return [];
+    if (!docEntry) return { lines: [], docxBase64 };
     const xmlStr = new TextDecoder('utf-8').decode(docEntry.data);
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlStr, 'application/xml');
@@ -750,9 +729,9 @@ export async function extractLinesFromDocxBlob(blob: Blob): Promise<string[]> {
       }
       if (line.trim()) lines.push(line.trim());
     }
-    return lines;
+    return { lines, docxBase64 };
   } catch (e) {
     console.warn('extractLinesFromDocxBlob error:', e);
-    return [];
+    return { lines: [], docxBase64: '' };
   }
 }

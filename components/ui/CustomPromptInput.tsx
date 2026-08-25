@@ -15,14 +15,10 @@ export interface StyleToggles {
 }
 
 export interface CustomPromptInputProps {
-  prompt?: string;
-  value?: string;
-  onPromptChange?: (prompt: string) => void;
-  onChange?: (prompt: string) => void;
-  label?: string;
-  placeholder?: string;
+  prompt: string;
+  onPromptChange: (prompt: string) => void;
   images?: Array<{ data: string; mimeType: string }>;
-  onImagesChange?: (images: Array<{ data: string; mimeType: string }>) => void;
+  onImagesChange?: (images: any) => void;
   className?: string;
   isLiveMode?: boolean;
   styleToggles?: StyleToggles;
@@ -43,42 +39,51 @@ export function sanitizeRuleInput(input: string): string {
     .replace(/>/g, '&gt;');
 }
 
+const DEFAULT_STYLE_TOGGLES: StyleToggles = {
+  telegraphic: true,
+  boldAbnormalities: true,
+  radsAutoCompute: true,
+  compactImpression: true,
+};
+
 const CustomPromptInput: React.FC<CustomPromptInputProps> = ({
   prompt,
-  value,
   onPromptChange,
-  onChange,
-  label,
-  placeholder,
   images,
   onImagesChange,
   className = '',
   isLiveMode = false,
-  styleToggles = {
-    telegraphic: true,
-    boldAbnormalities: true,
-    radsAutoCompute: true,
-    compactImpression: true,
-  },
+  styleToggles = DEFAULT_STYLE_TOGGLES,
   onStyleTogglesChange,
 }) => {
-  const activePrompt = (typeof prompt === 'string' ? prompt : (typeof value === 'string' ? value : ''));
-  const triggerChange = (newVal: string) => {
-    if (onPromptChange) onPromptChange(newVal);
-    if (onChange) onChange(newVal);
-  };
-
   const [isOpen, setIsOpen] = useState(false);
   const { isRecording, startRecording, stopRecording, error: recorderError } = useAudioRecorder();
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
 
-  // Local style toggles state
-  const [localToggles, setLocalToggles] = useState<StyleToggles>(styleToggles);
+  // Local style toggles state initialized safely
+  const [localToggles, setLocalToggles] = useState<StyleToggles>(styleToggles || DEFAULT_STYLE_TOGGLES);
 
   useEffect(() => {
-    setLocalToggles(styleToggles);
-  }, [styleToggles]);
+    if (styleToggles) {
+      setLocalToggles(prev => {
+        if (
+          prev.telegraphic === styleToggles.telegraphic &&
+          prev.boldAbnormalities === styleToggles.boldAbnormalities &&
+          prev.radsAutoCompute === styleToggles.radsAutoCompute &&
+          prev.compactImpression === styleToggles.compactImpression
+        ) {
+          return prev;
+        }
+        return styleToggles;
+      });
+    }
+  }, [
+    styleToggles?.telegraphic,
+    styleToggles?.boldAbnormalities,
+    styleToggles?.radsAutoCompute,
+    styleToggles?.compactImpression,
+  ]);
 
   const handleToggleChange = (key: keyof StyleToggles) => {
     const updated = {
@@ -99,8 +104,8 @@ const CustomPromptInput: React.FC<CustomPromptInputProps> = ({
         const audioBlob = await stopRecording();
         if (audioBlob && audioBlob.size > 0) {
           const transcript = await transcribeAudioForPrompt(audioBlob);
-          const newPrompt = activePrompt ? `${activePrompt} ${transcript}` : transcript;
-          triggerChange(newPrompt.slice(0, MAX_CUSTOM_RULES_LENGTH));
+          const newPrompt = prompt ? `${prompt} ${transcript}` : transcript;
+          onPromptChange(newPrompt.slice(0, MAX_CUSTOM_RULES_LENGTH));
         }
       } catch (err) {
         setTranscriptionError(err instanceof Error ? err.message : 'An unknown error occurred during transcription.');
@@ -127,16 +132,16 @@ const CustomPromptInput: React.FC<CustomPromptInputProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                  {label || 'Global Custom Instructions & Doctor Preferences'}
+                  Global Custom Instructions & Doctor Preferences
                 </h3>
-                {activePrompt ? (
+                {prompt && (
                   <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300">
-                    Active ({activePrompt.length} chars)
+                    Active ({prompt.length} chars)
                   </span>
-                ) : null}
+                )}
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                {activePrompt ? `${activePrompt.slice(0, 70)}...` : (placeholder || 'Add optional doctor phrasing rules, specific measurements, or custom style instructions')}
+                {prompt ? `${prompt.slice(0, 70)}...` : 'Add optional doctor phrasing rules, specific measurements, or custom style instructions'}
               </p>
             </div>
           </div>
@@ -187,18 +192,18 @@ const CustomPromptInput: React.FC<CustomPromptInputProps> = ({
             <div>
               <div className="flex justify-between items-center mb-1">
                 <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                  {label || 'Doctor Preferences & Phrasing Instructions:'}
+                  Doctor Preferences & Phrasing Instructions:
                 </label>
                 <span className="text-[10px] text-slate-400">
-                  {activePrompt.length} / {MAX_CUSTOM_RULES_LENGTH} chars
+                  {prompt.length} / {MAX_CUSTOM_RULES_LENGTH} chars
                 </span>
               </div>
               <div className="relative">
                 <textarea
                   rows={4}
-                  value={activePrompt}
-                  onChange={e => triggerChange(e.target.value.slice(0, MAX_CUSTOM_RULES_LENGTH))}
-                  placeholder={placeholder || "e.g. 'Always report measurements in mm', 'Include clinical correlation note in impression', 'Use bulleted points for pelvic findings'..."}
+                  value={prompt}
+                  onChange={e => onPromptChange(e.target.value.slice(0, MAX_CUSTOM_RULES_LENGTH))}
+                  placeholder="e.g. 'Always report measurements in mm', 'Include clinical correlation note in impression', 'Use bulleted points for pelvic findings'..."
                   className="w-full p-3 pr-12 text-xs font-mono border border-slate-300 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 />
                 <button

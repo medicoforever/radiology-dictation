@@ -20,8 +20,8 @@ import BrainIcon from './icons/BrainIcon';
 import MicIcon from './icons/MicIcon';
 import DownloadIcon from './icons/DownloadIcon';
 import TrashIcon from './icons/TrashIcon';
-
-
+import { mergeFindingsIntoDocx, downloadDocxBlob } from '../services/docxService';
+import { SelectedTemplateData } from './ui/TemplateSelectionModal';
 
 interface ChatMessage {
   author: 'You' | 'AI';
@@ -54,6 +54,10 @@ interface ResultsDisplayProps {
   onResumeLive?: () => void;
   identifiedErrors?: IdentifiedError[];
   errorCheckStatus?: 'idle' | 'checking' | 'complete';
+  selectedTemplate?: SelectedTemplateData | null;
+  onSelectTemplate?: (template: SelectedTemplateData) => void;
+  docxBlob?: Blob | null;
+  onDocxBlobChange?: (blob: Blob | null) => void;
 }
 
 const parseStructuredFinding = (finding: string) => {
@@ -100,7 +104,11 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
   onPauseLive,
   onResumeLive,
   identifiedErrors = [],
-  errorCheckStatus = 'idle'
+  errorCheckStatus = 'idle',
+  selectedTemplate = null,
+  onSelectTemplate,
+  docxBlob = null,
+  onDocxBlobChange
 }) => {
   const [isAllCopied, setIsAllCopied] = useState<boolean>(false);
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set<number>());
@@ -538,6 +546,31 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
     onReset();
   }
 
+  const handleDownloadDocx = async () => {
+    if (!findings || findings.length === 0) {
+      showNotification('No findings available to download as Word DOCX.');
+      return;
+    }
+    try {
+      if (docxBlob) {
+        const title = selectedTemplate?.name || findings[0] || 'Radiology_Report';
+        const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
+        downloadDocxBlob(docxBlob, cleanFileName);
+        showNotification('Downloaded Word DOCX report (Times New Roman 12pt)!');
+        return;
+      }
+      const title = selectedTemplate?.name || findings[0] || 'Radiology_Report';
+      const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
+      const templateBase64 = selectedTemplate?.docxBase64;
+      const blob = await mergeFindingsIntoDocx(templateBase64, findings, title);
+      downloadDocxBlob(blob, cleanFileName);
+      showNotification('Downloaded Word DOCX report (Times New Roman 12pt)!');
+    } catch (err) {
+      console.error('Failed to generate or download DOCX:', err);
+      showNotification('Failed to generate DOCX file.');
+    }
+  };
+
   const handleDownloadHTML = () => {
     if (!findings || findings.length === 0) return;
     try {
@@ -921,8 +954,9 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
     setUndoState([...findings]);
     const updated = findings.filter((_, i) => i !== indexToDelete);
     onAllFindingsUpdate(updated);
-    if (editingState?.index === indexToDelete) {
-      setEditingState(null);
+    if (editingIndex === indexToDelete) {
+      setEditingIndex(null);
+      setEditingText('');
     }
   };
 
@@ -1307,6 +1341,7 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               )}
             </div>
           );
+        })}
         {(!findings || findings.length === 0) && !isLive && (
             <div className="text-center py-8 text-slate-500 dark:text-slate-400">
                 <p>No findings have been transcribed yet.</p>
@@ -1514,11 +1549,22 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
             >
               Download Audio
             </button>
+            {(selectedTemplate || docxBlob) && (
+              <button
+                onClick={handleDownloadDocx}
+                disabled={!findings || findings.length === 0}
+                className="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed w-full sm:w-auto flex items-center justify-center gap-1.5 shadow-md"
+              >
+                <DownloadIcon className="w-5 h-5" />
+                Download Merged Report (.docx)
+              </button>
+            )}
             <button
               onClick={handleDownloadHTML}
               disabled={!findings || findings.length === 0}
-              className="bg-green-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50 transition-colors disabled:bg-green-300 disabled:cursor-not-allowed w-full sm:w-auto"
+              className="bg-green-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50 transition-colors disabled:bg-green-300 disabled:cursor-not-allowed w-full sm:w-auto flex items-center justify-center gap-1.5"
             >
+              <DownloadIcon className="w-5 h-5" />
               Download as HTML
             </button>
           </>

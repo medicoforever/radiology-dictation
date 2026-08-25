@@ -6,6 +6,7 @@ import { extractTextFromDocxBlob } from './docxService';
 import { buildDocumentAstFromDocx, applyAstMutationsToDocx, AstMutation } from './docxAstService';
 
 import { isRAGStyleMatchingEnabled, getRelevantStyleTemplates, augmentPromptWithStyleTemplates } from './reportStyleRAG';
+import { findCrossModalitySkills } from './templateCatalog';
 
 export const getAiClient = (lastFailedKey?: string) => {
   const keys = getStoredApiKeys();
@@ -72,8 +73,20 @@ export const isTextBlob = (blob: Blob, fileName?: string): boolean => {
   return false;
 };
 
-// User's strictly configured model list in exact order down to gemini-2.5-flash (excluding gemini-3.5-flash-lite)
+// User's strictly configured model list in exact order
 export const USER_CONFIGURED_MODELS = [
+  'gemini-3.1-pro-preview',
+  'gemini-3.5-flash',
+  'gemini-3.7-flash',
+  'gemini-3-flash-preview',
+  'gemini-3.6-flash',
+  'gemini-2.5-flash',
+  'gemini-3.5-flash-lite',
+];
+
+// Fallback cascade chain stops at gemini-2.5-flash and strictly excludes gemini-3.5-flash-lite
+export const FALLBACK_CHAIN_MODELS = [
+  'gemini-3.1-pro-preview',
   'gemini-3.5-flash',
   'gemini-3.7-flash',
   'gemini-3-flash-preview',
@@ -81,80 +94,66 @@ export const USER_CONFIGURED_MODELS = [
   'gemini-2.5-flash',
 ];
 
+export function getModelFallbackQueue(selectedModel?: string): string[] {
+  const target = getValidModelName(selectedModel || 'gemini-3.1-pro-preview');
+  const indexInChain = FALLBACK_CHAIN_MODELS.indexOf(target);
+  
+  if (indexInChain !== -1) {
+    // Return the selected model followed by all lower-down models in order up to gemini-2.5-flash
+    return FALLBACK_CHAIN_MODELS.slice(indexInChain);
+  }
+  
+  // If selected model is not in the fallback chain (e.g. gemini-3.5-flash-lite), try only that model
+  return [target];
+}
+
 /**
- * Universal Cascading Gemini API caller with Exponential Backoff & Model Switching
- * If the selected model hits rate limits or server errors, automatically cascades
- * sequentially down the exact configured model list until gemini-2.5-flash level.
+ * Auto-retrying Gemini API caller with Model Cascading Fallback.
+ * If the selected model encounters a rate limit (429/quota), overload (503/500/high demand),
+ * or any failure, it automatically cascades down the user's defined order:
+ * gemini-3.1-pro-preview -> gemini-3.5-flash -> gemini-3.7-flash -> gemini-3-flash-preview -> gemini-3.6-flash -> gemini-2.5-flash
+ * It strictly stops at gemini-2.5-flash and does NOT cascade to gemini-3.5-flash-lite.
  */
 export async function generateContentWithRetry(
-  params: any,
-  maxRetriesPerModel: number = 2
+  params: any
 ): Promise<GenerateContentResponse> {
-  const requestedModel = params.model || 'gemini-3.5-flash';
-  const startModel = getValidModelName(requestedModel);
-
-  // Build cascade queue starting from requested model down to gemini-2.5-flash, then wrapping around
-  const startIndex = USER_CONFIGURED_MODELS.indexOf(startModel);
-  let modelCascade: string[] = [];
-
-  if (startIndex !== -1) {
-    modelCascade = [
-      ...USER_CONFIGURED_MODELS.slice(startIndex),
-      ...USER_CONFIGURED_MODELS.slice(0, startIndex)
-    ];
-  } else {
-    modelCascade = [startModel, ...USER_CONFIGURED_MODELS.filter(m => m !== startModel)];
-  }
+  const initialModel = params.model || 'gemini-3.1-pro-preview';
+  const modelQueue = getModelFallbackQueue(initialModel);
 
   let lastError: any = null;
-  let currentKey: string | undefined = undefined;
+  let lastFailedKey: string | undefined = undefined;
 
-  for (const modelToTry of modelCascade) {
-    // Strictly do not cascade to gemini-3.5-flash-lite unless user explicitly selected it
-    if (modelToTry === 'gemini-3.5-flash-lite' && startModel !== 'gemini-3.5-flash-lite') {
-      continue;
+  for (let i = 0; i < modelQueue.length; i++) {
+    const currentModel = modelQueue[i];
+    const isFallback = i > 0;
+    
+    if (isFallback) {
+      console.warn(`[Gemini Fallback] Previous model failed. Cascading down to lower model: ${currentModel} (attempt ${i + 1}/${modelQueue.length})`);
     }
 
-    const currentParams = {
-      ...params,
-      model: getValidModelName(modelToTry)
-    };
-
-    for (let attempt = 0; attempt < maxRetriesPerModel; attempt++) {
-      try {
-        const clientWrapper = getAiClient(currentKey);
-        currentKey = clientWrapper.key;
-        return await clientWrapper.client.models.generateContent(currentParams);
-      } catch (err: any) {
-        lastError = err;
-        const errStr = String(err?.message || err);
-        const isRateLimitOrTransient =
-          errStr.includes('429') ||
-          errStr.includes('RESOURCE_EXHAUSTED') ||
-          errStr.includes('quota') ||
-          errStr.includes('rate limit') ||
-          errStr.includes('503') ||
-          errStr.includes('UNAVAILABLE') ||
-          errStr.includes('high demand') ||
-          errStr.includes('overloaded') ||
-          errStr.includes('fetch failed');
-
-        if (!isRateLimitOrTransient) {
-          console.warn(`[Gemini API] Non-retryable error on model ${modelToTry}:`, errStr);
-          break;
-        }
-
-        console.warn(`[Gemini API] Model ${modelToTry} attempt ${attempt + 1} hit rate limit / transient error (${errStr}). Retrying with next key / next model in cascade...`);
-        currentKey = getFallbackApiKey(currentKey);
-        await new Promise(r => setTimeout(r, 400 + Math.random() * 200));
+    try {
+      const { client, key } = getAiClient(lastFailedKey);
+      const callParams = {
+        ...params,
+        model: currentModel,
+      };
+      return await client.models.generateContent(callParams);
+    } catch (err: any) {
+      lastError = err;
+      const errStr = String(err?.message || err);
+      console.warn(`[Gemini API] Request failed with model ${currentModel}: ${errStr}`);
+      
+      // If there are more models down the chain up to gemini-2.5-flash, cascade to the next one
+      if (i < modelQueue.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        continue;
       }
     }
-
-    console.warn(`[Gemini API] Model ${modelToTry} exhausted retries. Cascading down to next model in order...`);
   }
 
-  throw lastError || new Error("All configured Gemini models in cascade failed.");
+  throw lastError || new Error(`All models in the fallback chain failed down to gemini-2.5-flash.`);
 }
+
 /**
  * Local Deterministic Emergency Fallback
  * Guarantees zero data loss if Google API is completely unavailable.
@@ -268,9 +267,12 @@ const responseSchema = {
 };
 
 export const getValidModelName = (model?: string): string => {
-  if (!model) return 'gemini-3.5-flash';
+  if (!model) return 'gemini-3.1-pro-preview';
   const m = model.toLowerCase().trim();
   
+  if (m.includes('3.1-pro') || m.includes('3.1') || m === 'gemini-3.1-pro-preview') {
+    return 'gemini-3.1-pro-preview';
+  }
   if (m.includes('3.5-flash-lite') || m === 'gemini-3.5-flash-lite') {
     return 'gemini-3.5-flash-lite';
   }
@@ -283,17 +285,8 @@ export const getValidModelName = (model?: string): string => {
   if (m.includes('3.6') || m === 'gemini-3.6-flash') {
     return 'gemini-3.6-flash';
   }
-  if (m.includes('3.5-flash-lite') || m === 'gemini-3.5-flash-lite') {
-    return 'gemini-3.5-flash-lite';
-  }
-  if (m.includes('3.5') || m === 'gemini-3.5-flash') {
-    return 'gemini-3.5-flash';
-  }
   if (m.includes('3-flash') || m === 'gemini-3-flash-preview') {
     return 'gemini-3-flash-preview';
-  }
-  if (m.includes('3.1-pro') || m === 'gemini-3.1-pro-preview') {
-    return 'gemini-3.1-pro-preview';
   }
   if (m === 'gemini-2.5-flash' || m === 'gemini-2.5-pro' || m === 'gemini-2.0-flash' || m === 'gemini-2.0-flash-lite') {
     return m;
@@ -315,7 +308,7 @@ export const processAudioWithDocx = async (
   existingFindings?: string[],
   batchName?: string,
   selectedTemplate?: { id?: string; name: string; category?: string; modality?: string; lines?: string[]; docxBase64?: string; skillPrompt?: string } | null,
-  skillEnabled: boolean = false,
+  skillEnabled: boolean = true,
   activeSkillPrompt?: string,
   consultantStyleEnabled: boolean = false
 ): Promise<{ findings: string[]; docxBlob?: Blob }> => {
@@ -351,12 +344,12 @@ export const processAudioWithDocx = async (
       if (astResult && astResult.findings && astResult.findings.length > 0) {
         return astResult;
       }
-      const fallbackFindings = await mergeFindingsWithTemplate(transcribedText, selectedTemplate, model, customPrompt, customImages, skillEnabled, activeSkillPrompt, consultantStyleEnabled);
+      const fallbackFindings = await mergeFindingsWithTemplate(transcribedText, selectedTemplate, model, customPrompt, customImages);
       return { findings: fallbackFindings };
     } catch (step2Error: any) {
       console.warn('AST merge failed, trying mergeFindingsWithTemplate fallback:', step2Error);
       try {
-        const fallbackFindings = await mergeFindingsWithTemplate(transcribedText, selectedTemplate, model, customPrompt, customImages, skillEnabled, activeSkillPrompt, consultantStyleEnabled);
+        const fallbackFindings = await mergeFindingsWithTemplate(transcribedText, selectedTemplate, model, customPrompt, customImages);
         return { findings: fallbackFindings };
       } catch (fallbackErr) {
         console.warn('Generating emergency local merged fallback:', fallbackErr);
@@ -405,18 +398,17 @@ export const processAudio = async (
         model,
         customPrompt,
         customImages,
-        false,
-        (selectedTemplate as any).skillPrompt,
-        false
+        true,
+        (selectedTemplate as any).skillPrompt
       );
       if (findings && findings.length > 0) {
         return findings;
       }
-      return await mergeFindingsWithTemplate(transcribedText, selectedTemplate, model, customPrompt, customImages, false, (selectedTemplate as any).skillPrompt, false);
+      return await mergeFindingsWithTemplate(transcribedText, selectedTemplate, model, customPrompt, customImages);
     } catch (step2Error: any) {
       console.warn('AST merge failed, trying mergeFindingsWithTemplate fallback:', step2Error);
       try {
-        return await mergeFindingsWithTemplate(transcribedText, selectedTemplate, model, customPrompt, customImages, false, (selectedTemplate as any).skillPrompt, false);
+        return await mergeFindingsWithTemplate(transcribedText, selectedTemplate, model, customPrompt, customImages);
       } catch (fallbackErr) {
         console.warn('Generating emergency local merged fallback:', fallbackErr);
         return generateLocalMergedFallback(transcribedText, selectedTemplate);
@@ -519,7 +511,7 @@ export const processAudio = async (
   }
 };
 
-export const continueAudioDictation = async (existingText: string, audioBlob: Blob, customPrompt?: string): Promise<string> => {
+export const continueAudioDictation = async (existingText: string, audioBlob: Blob, customPrompt?: string, model: string = 'gemini-3.1-pro-preview'): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   let prompt = `You are an expert medical transcriptionist specializing in radiology. A user is adding to their dictation.
@@ -556,7 +548,7 @@ Follow these strict instructions to produce a clean and accurate continuation:
 
   try {
     const response: GenerateContentResponse = await generateContentWithRetry({
-      model: getValidModelName('gemini-2.0-flash-lite'),
+      model: getValidModelName(model),
       contents: [textPart, audioPart],
     });
 
@@ -574,7 +566,7 @@ Follow these strict instructions to produce a clean and accurate continuation:
   }
 };
 
-export const modifyFindingWithAudio = async (originalText: string, audioBlob: Blob, customPrompt?: string): Promise<string> => {
+export const modifyFindingWithAudio = async (originalText: string, audioBlob: Blob, customPrompt?: string, model: string = 'gemini-3.1-pro-preview'): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   let prompt = `You are an expert medical transcriptionist assistant. You will be given an existing medical finding text and an audio recording. The audio contains instructions and/or additional dictation to modify the original finding.
@@ -611,7 +603,7 @@ Now, listen to the audio and provide the single, updated finding text.`;
 
   try {
     const response: GenerateContentResponse = await generateContentWithRetry({
-      model: getValidModelName('gemini-2.5-flash'),
+      model: getValidModelName(model),
       contents: [textPart, audioPart],
     });
 
@@ -856,54 +848,36 @@ export const mergeFindingsWithAst = async (
   model: string,
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  skillEnabled: boolean = false,
+  skillEnabled: boolean = true,
   activeSkillPrompt?: string,
   consultantStyleEnabled: boolean = false
 ): Promise<{ findings: string[]; docxBlob?: Blob }> => {
   if (!selectedTemplate.docxBase64) {
-    const findings = await mergeFindingsWithTemplate(findingsText, selectedTemplate, model, customPrompt, customImages, skillEnabled, activeSkillPrompt, consultantStyleEnabled);
+    const findings = await mergeFindingsWithTemplate(findingsText, selectedTemplate, model, customPrompt, customImages, skillEnabled, activeSkillPrompt);
     return { findings };
   }
 
   try {
-    const { ast, xmlDoc, zipEntries, pMap, cellMap, impressionHeaderId, impressionSlotIds } = await buildDocumentAstFromDocx(selectedTemplate.docxBase64);
+    const { ast, xmlDoc, zipEntries, pMap, cellMap, impressionSlotIds } = await buildDocumentAstFromDocx(selectedTemplate.docxBase64);
 
-    // Cross-Modality Auto-Skill Discovery for AST Merger (only when skillEnabled is active)
-    const secondarySkills = (skillEnabled === true)
+    // Cross-Modality Auto-Skill Discovery for AST Merger
+    const secondarySkills = (skillEnabled !== false)
       ? findCrossModalitySkills(findingsText, selectedTemplate.id)
       : [];
 
     let crossSkillBlock = '';
-    if (secondarySkills.length > 0) {
       crossSkillBlock = `\n\n### ⚡ CROSS-MODALITY & INCIDENTAL PATHOLOGY CONSULTANT DIRECTIVES (Auto-Detected Secondary Skills):\nThe radiologist's dictation includes clinical findings related to adjacent or incidental organ systems. You MUST cross-reference the following specialized consultant directives for those findings:\n` + secondarySkills.map(s => `[CROSS-MODALITY SKILL: ${s.name} (${s.category || 'Specialized'})]:\n${s.skillPrompt}`).join('\n\n') + `\n*Directive for Cross-Modality Findings*: Use the exact consultant grading, AST pathological translation, and diagnostic criteria from the matching secondary skill above.`;
-    }
 
-    const titleNode = ast.find(n => n.type === 'title');
-    const docTitle = titleNode?.current_text?.trim() || selectedTemplate.lines?.[0] || selectedTemplate.name;
-
-    const styleDirectives = consultantStyleEnabled
-      ? `4. **Vague Dictation Translation**:
-   - Translate colloquial phrases into formal consultant terminology: "fuzzy liver thing" -> "Ill-defined focal lesion in segment VI...", "whited out left base" -> "Homogeneous dense opacification of the left hemithorax base...", "dirty fat around appendix" -> "Blind-ending thickened appendix with surrounding fat stranding...", "bright spot on dwi" -> "Focal area of acute restricted diffusion on DWI...", "torn meniscus" -> "Linear high signal intensity... consistent with meniscal tear", "broken hip ball" -> "Displaced subcapital fracture of femoral neck".
-5. **RADS Scoring Standards**:
-   - BI-RADS (0-6), PI-RADS v2.1 (PZ vs TZ sequence dominance, categories 1-5), TI-RADS (TR1-TR5), LI-RADS (LR-1 to LR-5), Lung-RADS v2022 (Categories 1-4X), CAD-RADS 2.0 (0-5 with modifiers).
-6. **Non-Verb Impression Synthesis**:
-   - Synthesize concise, non-verb bullet points under "impression": ["Point 1", "Point 2"].
-   - In "display_findings", format impression as: "IMPRESSION:###Point 1###Point 2".
-   - If all findings normal: "IMPRESSION:###Normal study.###No significant abnormality detected."`
-      : `4. **STRICT VERBATIM FINDINGS INSERTION MANDATE**:
-   - You MUST insert the radiologist's findings into the matching target anatomical node EXACTLY as dictated/provided.
-   - Do NOT rewrite, expand, paraphrase, or embellish the radiologist's sentences into different consultant language.
-   - Do NOT add extra adjectives, unmentioned clinical details, or additional sentences.
-5. **IMPRESSION PRESERVATION MANDATE**:
-   - Preserve whatever impression was provided in the input text.
-   - If NO impression was dictated or provided by the radiologist, RETAIN the template's baseline normal impression without synthesizing new AI diagnostic assertions or inferences.`;
+    const consultantStyleBlock = consultantStyleEnabled
+      ? `\n### ⚡ AI CONSULTANT PHRASING MODE (ACTIVE):\n- Translate shorthand/vague phrases into formal consultant terminology.\n- Apply RADS scoring standards and diagnostic staging where appropriate.\n- Synthesize a comprehensive impression prioritizing actionable abnormal findings.\n`
+      : `\n### ✓ VERBATIM / LITERAL MERGE MODE (ACTIVE - DEFAULT):\n- Ingest and merge the provided findings directly and faithfully into matching template nodes.\n- Preserve the exact dictated wording, phrasing, and specificity of the provided text without inventing extra consultant phrases, extraneous sentences, or unauthorized diagnostic syntheses.\n- Retain normal baseline template nodes as-is unless directly contradicted or updated by the dictated findings.\n`;
 
     const astPrompt = `You are an expert radiology report integration engine.
 Your task is to merge the radiologist's findings into the target document's exact Abstract Syntax Tree (AST) nodes.
 
 ### ZERO CONVERSATIONAL FILLER MANDATE:
 Do NOT output any conversational preamble, commentary, AI pleasantries, or sign-offs. Produce ONLY pure clinical data in the JSON schema.
-
+${consultantStyleBlock}
 ## TARGET DOCUMENT AST NODES:
 ${JSON.stringify(ast, null, 2)}
 
@@ -916,37 +890,31 @@ ${findingsText}
 
 ---
 
-## STRICT AST SURGERY & CLINICAL FIDELITY RULES:
+## STRICT AST SURGERY & 100% CLINICAL FIDELITY RULES:
 1. **100% Comprehensive Clinical Ingestion**:
    - EVERY observation, measurement, pathology, and clinical history dictated by the radiologist MUST be completely included in the final report.
-2. **Surgical Node Updates, Clinical Profile Placement & Contradiction Removal**:
+2. **Surgical Node Updates, Mingled Sentence Splitting & Contradiction Removal**:
    - Map each clinical finding to its most appropriate anatomical node_id.
-   - **Clinical Profile / History Placement**: Always map the clinical history / patient complaint to the "Clinical profile:" or "Indication:" node at the top of the report (written as "Clinical profile: ..."). NEVER insert Clinical Profile at the bottom.
-   - **Baseline Normal Sentence Overwrite**: When an anatomical structure is dictated with an abnormal finding (e.g. SI joint degenerative changes, facet arthropathy, disc bulge), you MUST target the baseline normal template node for that structure (e.g. "SI joints and pubic symphysis appears normal" or "No disc bulge or protrusion is seen") in "updates" to overwrite it with the abnormal finding. NEVER leave the baseline normal sentence untouched or duplicated alongside the abnormal finding.
    - **Mingled Sentence Handling**: If a baseline template node combines multiple anatomical concepts (e.g. "The basal cisterns, cortical sulci and sylvian fissures are normal") and only one structure is abnormal (e.g. cortical sulcal prominence), rewrite that node so the normal structures are retained (e.g. "The basal cisterns are normal.") and the abnormal finding is accurately documented.
    - **Automatic Contradiction Removal**: If an abnormal finding supersedes, covers, or contradicts an existing baseline normal node (e.g. ventricular atrophy finding supersedes normal ventricular system node, or disc bulge finding supersedes 'no significant disc bulge' node), you MUST include that superseded normal node in "updates" with "new_text": "" (empty string) so it is cleanly removed from the Word document with zero leftover contradictory text.
    - For unaffected normal nodes, do NOT include them in "updates" (they remain 100% intact with their original template styles).
-3. **5-Layer Structural DNA & BOLD Protocol**:
-   - Update Clinical Profile node if history/indication is dictated (written as "Clinical profile: ...").
-   - In "display_findings", produce the full ordered report array:
-     Layer 1: Exact Template Title: "${docTitle}" (MUST preserve the exact template document title verbatim without changing, shortening, or removing any words like MRI/CT) -> "Clinical profile: ..." (or "Clinical profile:") -> Technique -> Findings (prefix modified lines with "BOLD::", preserve normal lines verbatim without "BOLD::") -> Impression starting with "IMPRESSION:###" (or template baseline).
-${styleDirectives}
-${crossSkillBlock}
-7. **Cross-Template Contamination Isolation**:
+2. **5-Layer Structural DNA & BOLD Protocol**:
+   - Update Clinical Profile node if history/indication is dictated (written as "Clinical Profile: ...").
+   - In "display_findings", produce the full ordered report array: Capitalized Title -> "Clinical Profile: ..." (or "Clinical Profile:") -> Technique -> Findings (prefix modified lines with "BOLD::", preserve normal lines verbatim without "BOLD::") -> Synthesized Impression starting with "IMPRESSION:###".
+3. **Vague Dictation Translation**:
+   - Translate colloquial phrases into formal consultant terminology: "fuzzy liver thing" -> "Ill-defined focal lesion in segment VI...", "whited out left base" -> "Homogeneous dense opacification of the left hemithorax base...", "dirty fat around appendix" -> "Blind-ending thickened appendix with surrounding fat stranding...", "bright spot on dwi" -> "Focal area of acute restricted diffusion on DWI...", "torn meniscus" -> "Linear high signal intensity... consistent with meniscal tear", "broken hip ball" -> "Displaced subcapital fracture of femoral neck".
+4. **RADS Scoring Standards**:
+   - BI-RADS (0-6), PI-RADS v2.1 (PZ vs TZ sequence dominance, categories 1-5), TI-RADS (TR1-TR5), LI-RADS (LR-1 to LR-5), Lung-RADS v2022 (Categories 1-4X), CAD-RADS 2.0 (0-5 with modifiers).
+5. **Cross-Template Contamination Isolation**:
    - Restrict findings strictly to the active template's anatomical domain. Do NOT merge mismatched organ findings into unrelated template nodes.
-8. **TITLE IMMUTABILITY MANDATE**:
-   - The document title belongs strictly to the template document and MUST NOT be altered, shortened, or replaced by outside UI names or abbreviations. Do NOT include any title node in "updates".
-9. **BRAND-NEW / INCIDENTAL FINDINGS MANDATE ("insertions")**:
-   - If the radiologist dictates a pathology, measurement, or incidental finding that does NOT have a corresponding baseline node in the template AST (e.g. pleural effusion, atelectasis, lymphadenopathy, incidental cysts, fractures), you MUST include it in "insertions" specifying:
-     { "after_node_id": "<id of the preceding paragraph or paragraph immediately before IMPRESSION>", "text": "Exact clinical finding text", "bold": false }
-   - Also ensure it is present in "display_findings" at that exact same sequential position.
-10. Return JSON schema:
+6. **Non-Verb Impression Synthesis**:
+   - Synthesize concise, non-verb bullet points under "impression": ["Point 1", "Point 2"].
+   - In "display_findings", format impression as: "IMPRESSION:###Point 1###Point 2".
+   - If all findings normal: "IMPRESSION:###Normal study.###No significant abnormality detected."
+7. Return JSON schema:
 {
   "updates": [
     { "node_id": "node_...", "new_text": "...", "bold": true }
-  ],
-  "insertions": [
-    { "after_node_id": "node_...", "text": "...", "bold": false }
   ],
   "impression": ["..."],
   "display_findings": ["..."]
@@ -982,118 +950,20 @@ ${customPrompt ? `\nAdditional Instructions:\n${customPrompt}` : ''}
       const result = JSON.parse(cleaned);
 
       const updates: AstMutation[] = Array.isArray(result.updates) ? result.updates : [];
-      const rawInsertions: any[] = Array.isArray(result.insertions)
-        ? result.insertions
-        : (Array.isArray(result.inserted_findings) ? result.inserted_findings : []);
-      let impression: string[] = Array.isArray(result.impression) ? result.impression : [];
+      const impression: string[] = Array.isArray(result.impression) ? result.impression : [];
       const displayFindings: string[] = Array.isArray(result.display_findings) && result.display_findings.length > 0
         ? result.display_findings
         : [];
 
-      // Fallback: If result.impression is empty, extract bullet points directly from displayFindings
-      if (impression.length === 0 && displayFindings.length > 0) {
-        let inImp = false;
-        for (const line of displayFindings) {
-          const u = line.trim().toUpperCase();
-          if (u === 'IMPRESSION:' || u.startsWith('IMPRESSION:') || u === 'CONCLUSION:' || u.startsWith('CONCLUSION:')) {
-            inImp = true;
-            if (line.includes('###')) {
-              const parts = line.split('###').slice(1);
-              for (const p of parts) {
-                const cleanP = p.replace(/^BOLD::\s*/, '').replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim();
-                if (cleanP) impression.push(cleanP);
-              }
-            }
-            continue;
-          }
-          if (inImp) {
-            const cleanP = line.replace(/^BOLD::\s*/, '').replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim();
-            if (cleanP) impression.push(cleanP);
-          }
-        }
-      }
-
-      // Ensure all impression items have BOLD:: stripped from text
-      impression = impression.map(item => item.replace(/^BOLD::\s*/, '').replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim()).filter(Boolean);
-
-      // Filter out any mutation targeting the title node so template's native title is 100% untouched
-      const safeUpdates = updates.filter(u => {
-        const targetNode = ast.find(n => n.id === u.node_id);
-        return targetNode?.type !== 'title';
-      });
-
-      // Ensure displayFindings[0] uses the exact template document title verbatim
-      if (displayFindings.length > 0 && docTitle) {
-        displayFindings[0] = docTitle;
-      }
-
-      // Collect any extra/incidental findings from displayFindings that were not in safeUpdates or rawInsertions
-      const allInsertions: any[] = [...rawInsertions];
-      const insertedTexts = new Set(allInsertions.map(i => ((typeof i === 'string' ? i : i.text) || '').toLowerCase().replace(/[^a-z0-9]/g, '')));
-
-      let inImpSection = false;
-      let lastKnownNodeId: string | undefined;
-
-      for (let i = 0; i < displayFindings.length; i++) {
-        const df = displayFindings[i].trim();
-        if (!df) continue;
-        if (i === 0 && docTitle && df.toLowerCase().replace(/[^a-z0-9]/g, '') === docTitle.toLowerCase().replace(/[^a-z0-9]/g, '')) continue;
-        if (df.toUpperCase().startsWith('IMPRESSION:') || df.toUpperCase().startsWith('CONCLUSION:')) {
-          inImpSection = true;
-          continue;
-        }
-        if (inImpSection) continue;
-        if (df.includes('|')) continue;
-
-        const cleanDf = df.replace(/^BOLD::\s*/, '').trim();
-        const normDf = cleanDf.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!normDf) continue;
-
-        let matchedNodeId: string | undefined;
-        for (const u of safeUpdates) {
-          const normUt = (u.new_text || '').replace(/^BOLD::\s*/, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-          if (normUt && normDf && normUt === normDf) {
-            matchedNodeId = u.node_id;
-            break;
-          }
-        }
-        if (!matchedNodeId) {
-          const matchedAstNode = ast.find(n => {
-            if (n.type === 'table_cell') return false;
-            const normAst = (n.current_text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-            return normAst && normDf && normAst === normDf;
-          });
-          if (matchedAstNode) {
-            matchedNodeId = matchedAstNode.id;
-          }
-        }
-
-        if (matchedNodeId) {
-          lastKnownNodeId = matchedNodeId;
-        } else {
-          if (!insertedTexts.has(normDf)) {
-            allInsertions.push({
-              after_node_id: lastKnownNodeId,
-              text: df,
-              bold: df.startsWith('BOLD::')
-            });
-            insertedTexts.add(normDf);
-          }
-        }
-      }
-
-      // Apply exact AST mutations & clean-run insertions to the DOCX DOM
+      // Apply exact AST mutations to the DOCX DOM
       const docxBlob = await applyAstMutationsToDocx(
         xmlDoc,
         zipEntries,
         pMap,
         cellMap,
-        safeUpdates,
+        updates,
         impression,
-        impressionSlotIds,
-        impressionHeaderId,
-        allInsertions,
-        displayFindings
+        impressionSlotIds
       );
 
       const finalFindings = displayFindings.length > 0 ? displayFindings : (selectedTemplate.lines || [selectedTemplate.name]);
@@ -1103,7 +973,7 @@ ${customPrompt ? `\nAdditional Instructions:\n${customPrompt}` : ''}
     console.warn('AST merge failed, falling back to standard merger:', astErr);
   }
 
-  const findings = await mergeFindingsWithTemplate(findingsText, selectedTemplate, model, customPrompt, customImages, skillEnabled, activeSkillPrompt, consultantStyleEnabled);
+  const findings = await mergeFindingsWithTemplate(findingsText, selectedTemplate, model, customPrompt, customImages, skillEnabled, activeSkillPrompt);
   return { findings };
 };
 
@@ -1114,34 +984,16 @@ export const mergeFindingsWithTemplate = async (
   model: string,
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  skillEnabled: boolean = false,
-  activeSkillPrompt?: string,
-  consultantStyleEnabled: boolean = false
+  skillEnabled: boolean = true,
+  activeSkillPrompt?: string
 ): Promise<string[]> => {
   const normalFindingsText = selectedTemplate.lines && selectedTemplate.lines.length > 0
     ? selectedTemplate.lines.map((l, i) => `${i + 1}. ${l}`).join('\n')
     : selectedTemplate.name;
 
-  const templateDocTitle = selectedTemplate.lines && selectedTemplate.lines.length > 0
-    ? selectedTemplate.lines[0]
-    : selectedTemplate.name;
-
-  const consultantSkill = (skillEnabled === true && (activeSkillPrompt || selectedTemplate.skillPrompt)) 
+    const consultantSkill = (skillEnabled !== false && (activeSkillPrompt || selectedTemplate.skillPrompt)) 
     ? (activeSkillPrompt || selectedTemplate.skillPrompt)
     : '';
-
-  const styleRules = consultantStyleEnabled
-    ? `3. **Vague Dictation Translation & RADS Scoring**:
-   - Translate colloquial radiologist dictation into formal board-certified terminology ("fuzzy liver thing" -> "Ill-defined focal lesion in segment VI...", "whited out base" -> "Homogeneous dense opacification...", "dirty fat" -> "perilesional fat stranding...").
-   - Apply standardized scoring criteria for BI-RADS, PI-RADS v2.1, TI-RADS, LI-RADS, Lung-RADS v2022, CAD-RADS 2.0.
-4. **Non-Verb Impression Synthesis**:
-   - Format: "IMPRESSION:###Point 1###Point 2". Non-verb, concise summaries.
-   - If all findings normal: "IMPRESSION:###Normal study.###No significant abnormality detected."`
-    : `3. **STRICT VERBATIM FINDINGS INSERTION MANDATE**:
-   - Insert the radiologist's findings into the matching target anatomical section EXACTLY as dictated/provided.
-   - Do NOT rewrite, expand, or add extra consultant phrasing or unmentioned details.
-4. **IMPRESSION PRESERVATION**:
-   - Preserve whatever impression was provided in the input. If no impression was dictated, retain the template's default impression verbatim.`;
 
   const prompt = `You are an expert radiologist and medical transcriptionist.
 Your task is to merge the radiologist's findings directly into the target standard radiology report template.
@@ -1150,7 +1002,7 @@ Your task is to merge the radiologist's findings directly into the target standa
 Do NOT include any conversational preamble, pleasantries, commentary, or sign-offs. Produce ONLY pure clinical report strings within the JSON array.
 
 ## TARGET REPORT TEMPLATE:
-Title: ${templateDocTitle}
+Title: ${selectedTemplate.name}
 Modality: ${selectedTemplate.modality || selectedTemplate.category || 'Radiology'}
 Category: ${selectedTemplate.category || 'Standard'}
 
@@ -1170,17 +1022,22 @@ ${findingsText}
 
 ## STRICT 5-LAYER MERGING AND INTEGRATION RULES:
 1. **5-Layer Structural Hierarchy**:
-   - Layer 1: Title: ${templateDocTitle} (Use the EXACT title from the template document verbatim. NEVER alter, truncate, or replace with outside text)
+   - Layer 1: Title: ${selectedTemplate.name}
    - Layer 2: Clinical Profile: format as "*Clinical Profile: C/o [complaint] with H/o [history].*" or "*Clinical Profile:*" if none provided.
    - Layer 3: Scanning Technique: preserve the template's technique line.
    - Layer 4: Anatomical Findings: organized by anatomical subsystem.
-   - Layer 5: Impression: starting with "IMPRESSION:###".
+   - Layer 5: Synthesized Impression: starting with "IMPRESSION:###".
 2. **Deterministic Baseline Preservation & BOLD Marker Protocol**:
    - For any organ/structure where abnormal or dictated findings were provided, replace or update the normal description with the patient's actual finding and prefix that abnormal/dictated line with "BOLD::".
    - For all other structures where no abnormality was mentioned, keep the standard normal baseline line from the template VERBATIM, without "BOLD::".
-${styleRules}
-5. **Contamination Isolation Gate**:
+3. **Vague Dictation Translation & RADS Scoring**:
+   - Translate colloquial radiologist dictation into formal board-certified terminology ("fuzzy liver thing" -> "Ill-defined focal lesion in segment VI...", "whited out base" -> "Homogeneous dense opacification...", "dirty fat" -> "perilesional fat stranding...").
+   - Apply standardized scoring criteria for BI-RADS, PI-RADS v2.1, TI-RADS, LI-RADS, Lung-RADS v2022, CAD-RADS 2.0.
+4. **Contamination Isolation Gate**:
    - Strictly map findings to the active template's anatomical domain. Do NOT overwrite baseline normal organs with mismatched organ findings. Place out-of-domain incidental findings in a distinct paragraph before the impression.
+5. **Non-Verb Impression Synthesis**:
+   - Format: "IMPRESSION:###Point 1###Point 2". Non-verb, concise summaries. No extraneous numbers/measurements.
+   - If all findings normal: "IMPRESSION:###Normal study.###No significant abnormality detected."
 6. Output JSON format: { "findings": string[] }.
 ${customPrompt ? `\nAdditional Instructions:\n${customPrompt}` : ''}
 `;
@@ -1239,9 +1096,7 @@ export const processTextFindings = async (
   model: string,
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  selectedTemplate?: { id: string; name: string; category?: string; modality?: string; lines: string[]; docxBase64?: string; skillPrompt?: string } | null,
-  skillEnabled: boolean = false,
-  consultantStyleEnabled: boolean = false
+  selectedTemplate?: { id: string; name: string; category?: string; modality?: string; lines: string[]; docxBase64?: string; skillPrompt?: string } | null
 ): Promise<{ findings: string[]; docxBlob?: Blob }> => {
   if (selectedTemplate) {
     if (selectedTemplate.docxBase64) {
@@ -1252,9 +1107,8 @@ export const processTextFindings = async (
           model,
           customPrompt,
           customImages,
-          skillEnabled,
-          selectedTemplate.skillPrompt,
-          consultantStyleEnabled
+          true,
+          selectedTemplate.skillPrompt
         );
         if (astRes && astRes.findings && astRes.findings.length > 0) {
           return astRes;
@@ -1263,7 +1117,7 @@ export const processTextFindings = async (
         console.warn('AST text merge error, falling back:', e);
       }
     }
-    const findings = await mergeFindingsWithTemplate(rawText, selectedTemplate, model, customPrompt, customImages, skillEnabled, selectedTemplate.skillPrompt, consultantStyleEnabled);
+    const findings = await mergeFindingsWithTemplate(rawText, selectedTemplate, model, customPrompt, customImages);
     return { findings };
   }
 
@@ -1273,7 +1127,7 @@ export const processTextFindings = async (
   return { findings: directFindings };
 };
 
-export const transcribeAudioForPrompt = async (audioBlob: Blob, modelName = 'gemini-2.5-flash'): Promise<string> => {
+export const transcribeAudioForPrompt = async (audioBlob: Blob, modelName = 'gemini-3.1-pro-preview'): Promise<string> => {
   const base64Audio = await blobToBase64(audioBlob);
 
   const prompt = `You are an expert medical transcriptionist specializing in radiology dictation.
@@ -1313,7 +1167,7 @@ export const createChat = async (
   initialFindings: string[], 
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  model: string = 'gemini-2.5-flash'
+  model: string = 'gemini-3.1-pro-preview'
 ): Promise<Chat> => {
   const fileName = (audioBlob as any).name;
   const fileContent = await prepareFileContentPart(audioBlob, fileName);
@@ -1367,7 +1221,7 @@ export const createChatFromText = async (
   initialFindings: string[], 
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  model: string = 'gemini-2.5-flash'
+  model: string = 'gemini-3.1-pro-preview'
 ): Promise<Chat> => {
   const targetModel = getValidModelName(model);
   const userMessageParts: any[] = [];
@@ -1426,7 +1280,7 @@ const errorSchema = {
     required: ["errors"]
 };
 
-export const identifyPotentialErrors = async (findings: string[], model: string): Promise<IdentifiedError[]> => {
+export const identifyPotentialErrors = async (findings: string[], model: string = 'gemini-3.1-pro-preview'): Promise<IdentifiedError[]> => {
     const textPart = {
         text: `${ERROR_IDENTIFIER_PROMPT}\n\nReport to analyze:\n${JSON.stringify({ findings })}`,
     };
@@ -1462,7 +1316,7 @@ export const identifyPotentialErrors = async (findings: string[], model: string)
     }
 };
 
-export async function runAgenticAnalysis(content: string, selectedModel: string = 'gemini-2.5-flash'): Promise<{ finalResult: string; agenticSteps: string; enhancementText: string; }> {
+export async function runAgenticAnalysis(content: string, selectedModel: string = 'gemini-3.1-pro-preview'): Promise<{ finalResult: string; agenticSteps: string; enhancementText: string; }> {
     let agenticSteps = "### Agentic Workflow Log\n\n";
     let initialAnalyses: string[] = [];
     let refinedAnalyses: string[] = [];
@@ -1600,11 +1454,11 @@ export async function runAgenticAnalysis(content: string, selectedModel: string 
     }
 }
 
-export async function runComplexImpressionGeneration(currentFindings: string[], additionalFindings: string, selectedModel: string = 'gemini-2.5-flash'): Promise<{ findings: string[]; expertNotes: string; }> {
+export async function runComplexImpressionGeneration(currentFindings: string[], additionalFindings: string, selectedModel: string = 'gemini-3.1-pro-preview'): Promise<{ findings: string[]; expertNotes: string; }> {
     const content = currentFindings.join('\n\n') + (additionalFindings ? `\n\n${additionalFindings}` : '');
     const targetModel = getValidModelName(selectedModel);
 
-    const { finalResult: expertNotesContent } = await runAgenticAnalysis(content, targetModel);
+    const { finalResult: expertNotesContent, enhancementText } = await runAgenticAnalysis(content, targetModel);
 
     const findingsWithoutImpression = currentFindings.filter(f => !f.toUpperCase().startsWith('IMPRESSION:'));
 

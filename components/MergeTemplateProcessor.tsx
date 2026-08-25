@@ -10,7 +10,6 @@ import StopIcon from './icons/StopIcon';
 import SendIcon from './icons/SendIcon';
 import MicScribbleIcon from './icons/MicScribbleIcon';
 import TemplateSelectionModal, { SelectedTemplateData } from './ui/TemplateSelectionModal';
-import TemplateSelectorBanner from './ui/TemplateSelectorBanner';
 import CustomPromptInput from './ui/CustomPromptInput';
 import { mergeFindingsWithTemplate, mergeFindingsWithAst, modifyReportWithText, modifyReportWithAudio } from '../services/geminiService';
 import { mergeFindingsIntoDocx, downloadDocxBlob } from '../services/docxService';
@@ -56,15 +55,14 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [mergedFindings, setMergedFindings] = useState<string[] | null>(null);
-  const [mergedDocxBlob, setMergedDocxBlob] = useState<Blob | null>(null);
   const [autoDownloadDocx, setAutoDownloadDocx] = useState<boolean>(true);
   const [isCopied, setIsCopied] = useState<boolean>(false);
   const [downloadSuccess, setDownloadSuccess] = useState<string | null>(null);
 
-  // Consultant Style & Skill States (Both Default OFF for Literal Verbatim Merge)
+  // Intelligence & Skill System States
   const [isConsultantStyleActive, setIsConsultantStyleActive] = useState<boolean>(() => isConsultantStyleEnabled());
   const [isSkillEnabled, setIsSkillEnabled] = useState<boolean>(() => isTemplateSkillEnabled());
-  const [isSkillExpanded, setIsSkillExpanded] = useState<boolean>(false);
+  const [isSkillExpanded, setIsSkillExpanded] = useState<boolean>(true);
   const [customSkillPrompt, setCustomSkillPrompt] = useState<string>('');
   const [skillNotice, setSkillNotice] = useState<string | null>(null);
   const [isSavingCustomModalOpen, setIsSavingCustomModalOpen] = useState<boolean>(false);
@@ -206,15 +204,14 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
         customSkillPrompt.trim() || undefined,
         isConsultantStyleActive
       );
-      const safeResult = Array.isArray(result) ? result : [];
-      setMergedFindings(safeResult);
-      setMergedDocxBlob(docxBlob || null);
 
-      if (autoDownloadDocx && safeResult.length > 0) {
+      setMergedFindings(result);
+
+      if (autoDownloadDocx && result.length > 0) {
         try {
-          const title = activeTemplate.name || safeResult[0] || 'Radiology_Report';
+          const title = activeTemplate.name || result[0] || 'Radiology_Report';
           const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-          const blob = docxBlob || await mergeFindingsIntoDocx(activeTemplate.docxBase64, safeResult, title);
+          const blob = docxBlob || await mergeFindingsIntoDocx(activeTemplate.docxBase64, result, title);
           downloadDocxBlob(blob, cleanFileName);
           setDownloadSuccess(`Auto-downloaded "${cleanFileName}"`);
           setTimeout(() => setDownloadSuccess(null), 4000);
@@ -235,10 +232,7 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
     try {
       const title = activeTemplate?.name || mergedFindings[0] || 'Radiology_Report';
       const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-      const blob = (mergedDocxBlob instanceof Blob && mergedDocxBlob.size > 0)
-        ? mergedDocxBlob
-        : await mergeFindingsIntoDocx(activeTemplate?.docxBase64, mergedFindings, title);
-
+      const blob = await mergeFindingsIntoDocx(activeTemplate?.docxBase64, mergedFindings, title);
       downloadDocxBlob(blob, cleanFileName);
       setDownloadSuccess(`Downloaded "${cleanFileName}"`);
       setTimeout(() => setDownloadSuccess(null), 4000);
@@ -269,22 +263,6 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
     }
   };
 
-  const handleScrollToMainPlace = () => {
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    const el = document.getElementById('merge-dictation-main-top');
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  };
-
-  const handleNewDictationAndMoveTop = () => {
-    setMergedFindings(null);
-    setMergedDocxBlob(null);
-    setFindingsInput('');
-    setError(null);
-    handleScrollToMainPlace();
-  };
-
   const handleApplyTextModification = async () => {
     if (!modificationText.trim() || !mergedFindings) return;
     setModificationState('processing');
@@ -297,7 +275,6 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
         customNotes
       );
       setMergedFindings(updated);
-      setMergedDocxBlob(null);
       setModificationText('');
       setModificationState('idle');
     } catch (err: any) {
@@ -328,7 +305,6 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
           customNotes
         );
         setMergedFindings(updated);
-        setMergedDocxBlob(null);
         setModificationState('idle');
       } catch (err: any) {
         setModificationError(err?.message || 'Failed to apply audio change.');
@@ -344,18 +320,16 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
     const updated = [...mergedFindings];
     updated[idx] = editingText;
     setMergedFindings(updated);
-    setMergedDocxBlob(null);
     setEditingIndex(null);
   };
 
   const handleDeleteRow = (idx: number) => {
     if (!mergedFindings) return;
     setMergedFindings(mergedFindings.filter((_, i) => i !== idx));
-    setMergedDocxBlob(null);
   };
 
   return (
-    <div id="merge-dictation-main-top" className="w-full max-w-4xl mx-auto space-y-6">
+    <div className="w-full max-w-4xl mx-auto space-y-6">
       {/* Template Selection Modal */}
       <TemplateSelectionModal
         isOpen={isTemplateModalOpen}
@@ -435,16 +409,180 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
         )}
       </div>
 
-      {/* Main Banner */}
-      <TemplateSelectorBanner
-        selectedTemplate={activeTemplate}
-        onOpenModal={() => setIsTemplateModalOpen(true)}
-        onClearTemplate={() => setActiveTemplate(null)}
-        autoDownloadDocx={autoDownloadDocx}
-        onToggleAutoDownloadDocx={() => setAutoDownloadDocx(!autoDownloadDocx)}
-        onToggleAutoDownload={setAutoDownloadDocx}
-        onSelectTemplate={tmpl => setActiveTemplate(tmpl)}
-      />
+      {/* Selected Template Card */}
+      <div 
+        onClick={handleOpenModal}
+        className="bg-white dark:bg-slate-800 p-4 sm:p-5 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 cursor-pointer hover:border-blue-400 dark:hover:border-blue-600 transition-all"
+      >
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-bold text-slate-500 dark:text-slate-400">
+              Active Template:
+            </span>
+            {activeTemplate && (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-300">
+                {activeTemplate.category || activeTemplate.modality}
+              </span>
+            )}
+            <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${
+              isConsultantStyleActive
+                ? 'bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                : 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700'
+            }`}>
+              {isConsultantStyleActive ? '⚡ AI Consultant Phrasing Active' : '✓ Verbatim Merge Mode'}
+            </span>
+            {activeTemplate?.skillPrompt && (
+              <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                ⚡ Consultant Skill Attached
+              </span>
+            )}
+          </div>
+          <h3 className="text-base sm:text-lg font-black text-slate-900 dark:text-white">
+            {activeTemplate ? activeTemplate.name : 'No Template Selected (Click to Choose)'}
+          </h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {activeTemplate
+              ? `${activeTemplate.lines?.length || 0} standard normal sections • Native DOCX format`
+              : 'Please choose a CT, MRI, or custom DOCX template to merge your findings.'}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleOpenModal();
+          }}
+          className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs sm:text-sm shadow-md transition-all flex items-center gap-1.5 flex-shrink-0"
+        >
+          <SparklesIcon className="w-4 h-4" />
+          <span>{activeTemplate ? 'Change Template' : 'Select Template'}</span>
+        </button>
+      </div>
+
+      {/* DEDICATED AI CONSULTANT & SKILL DIRECTIVES CONFIGURATION */}
+      {activeTemplate && (
+        <div className="bg-white dark:bg-slate-800 p-4 sm:p-5 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+          <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-700">
+            <span className="text-xs font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">
+              Template Intelligence & Style Directives
+            </span>
+            <button
+              type="button"
+              onClick={() => setIsSkillExpanded(!isSkillExpanded)}
+              className="text-xs font-bold px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <span>{isSkillExpanded ? '▲ Hide Skill Prompt' : '⚙️ View / Edit Skill Prompt'}</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {/* TOGGLE 1: AI CONSULTANT PHRASING */}
+            <div className="flex items-start gap-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700/60">
+              <label className="relative inline-flex items-center cursor-pointer mt-0.5">
+                <input
+                  type="checkbox"
+                  checked={isConsultantStyleActive}
+                  onChange={e => handleToggleConsultantStyle(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={`text-xs font-black uppercase tracking-wider px-2 py-0.5 rounded-md ${
+                    isConsultantStyleActive 
+                      ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                      : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                  }`}>
+                    {isConsultantStyleActive ? '⚡ AI Consultant Phrasing Active' : '✓ Verbatim Merge (Default)'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
+                  {isConsultantStyleActive
+                    ? 'Translates shorthand dictation into formal consultant sentences, applies RADS scoring, and creates synthesized impressions.'
+                    : 'Findings merged verbatim into matching template nodes. No extra AI sentences or diagnostic syntheses added.'}
+                </p>
+              </div>
+            </div>
+
+            {/* TOGGLE 2: CONSULTANT SKILL DIRECTIVES */}
+            <div className="flex items-start gap-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700/60">
+              <label className="relative inline-flex items-center cursor-pointer mt-0.5">
+                <input
+                  type="checkbox"
+                  checked={isSkillEnabled}
+                  onChange={e => handleToggleSkill(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+              </label>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={`text-xs font-black uppercase tracking-wider px-2 py-0.5 rounded-md ${
+                    isSkillEnabled 
+                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                      : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400'
+                  }`}>
+                    {isSkillEnabled ? '⚡ Skill Directives Active' : 'Skill Directives Disabled'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
+                  {isSkillEnabled
+                    ? 'Applies specialized rules, organ-level AST replacement criteria, and incidental finding handling for this template.'
+                    : 'Standard template merge without specialized consultant skill prompt.'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* In-Line Skill Prompt Editor */}
+          {isSkillExpanded && (
+            <div className="pt-3 border-t border-slate-100 dark:border-slate-700 space-y-2.5 animate-fade-in">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                  Active Consultant Directives for <span className="text-blue-600 dark:text-blue-400">{activeTemplate.name}</span>:
+                </span>
+                {skillNotice && (
+                  <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 animate-pulse">
+                    {skillNotice}
+                  </span>
+                )}
+              </div>
+
+              <textarea
+                rows={7}
+                value={customSkillPrompt}
+                onChange={e => setCustomSkillPrompt(e.target.value)}
+                placeholder="Enter or modify consultant instructions, line replacements, and scoring rules for this template..."
+                className="w-full p-3 text-xs font-mono border border-slate-300 dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none leading-relaxed"
+              />
+
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs pt-1">
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  💡 <em>Changes here apply immediately to your current dictation session.</em>
+                </span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleResetSkillToDefault}
+                    className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 font-semibold"
+                  >
+                    ↺ Reset to Default
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsSavingCustomModalOpen(true)}
+                    className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold shadow-sm transition-all flex items-center gap-1"
+                  >
+                    <span>💾 Save as Custom Template</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {downloadSuccess && (
         <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-700 rounded-xl text-xs text-emerald-800 dark:text-emerald-200 font-bold flex items-center gap-2 animate-fade-in">
@@ -503,14 +641,44 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
             <CustomPromptInput
               prompt={customNotes}
               onPromptChange={setCustomNotes}
-              label="Doctor Preference Notes (Optional):"
-              placeholder="e.g. 'Always mention visualized thoracic inlet', 'Format as short paragraphs'..."
             />
           </div>
 
+          {/* Auto Download DOCX Toggle */}
+          <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-700">
+            <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-slate-700 dark:text-slate-300">
+              <input
+                type="checkbox"
+                checked={autoDownloadDocx}
+                onChange={e => setAutoDownloadDocx(e.target.checked)}
+                className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500"
+              />
+              <span>Auto-download Word (.docx) report upon generation</span>
+            </label>
+
+            <span className="text-[11px] text-slate-400">
+              Times New Roman 12pt • High-Fidelity
+            </span>
+          </div>
+
           {error && (
-            <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-xl text-xs text-red-600 dark:text-red-300 font-semibold">
-              {error}
+            <div className="p-3.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-xs font-semibold rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <span>⚠️ {error}</span>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 font-normal">
+                  Your findings are preserved. You can click Try Again or pick a different model to retry.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={handleMerge}
+                  disabled={isProcessing}
+                  className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg text-xs shadow transition-all whitespace-nowrap"
+                >
+                  ↻ Try Again
+                </button>
+              </div>
             </div>
           )}
 
@@ -548,14 +716,6 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
             <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
-                onClick={handleScrollToMainPlace}
-                className="px-3 py-2 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 rounded-xl text-xs font-extrabold transition-all flex items-center gap-1.5 shadow-xs"
-                title="Scroll smoothly up to main place"
-              >
-                <span>⬆ Move to Main / Top</span>
-              </button>
-              <button
-                type="button"
                 onClick={handleCopyAll}
                 className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-800 dark:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm"
               >
@@ -572,45 +732,31 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
               </button>
               <button
                 type="button"
-                onClick={handleNewDictationAndMoveTop}
-                className="px-3.5 py-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-bold transition-all flex items-center gap-1"
+                onClick={() => setMergedFindings(null)}
+                className="px-3.5 py-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-bold transition-all"
               >
-                <span>+ Next Dictation</span>
+                New Dictation
               </button>
             </div>
           </div>
 
           {/* Render Findings */}
           <div className="space-y-2 bg-slate-50 dark:bg-slate-900/60 p-4 rounded-xl border border-slate-200 dark:border-slate-700 font-sans text-xs sm:text-sm">
-            {Array.isArray(mergedFindings) && mergedFindings.map((rawLine, idx) => {
-              const line = typeof rawLine === 'string' ? rawLine : (rawLine ? String(rawLine) : '');
-              if (!line) return null;
+            {mergedFindings.map((line, idx) => {
               const isBold = line.startsWith('BOLD::');
-              const clean = isBold ? line.replace(/^BOLD::\s*/, '') : line;
-              const isImpression = clean.startsWith('IMPRESSION:') || clean.startsWith('CONCLUSION:');
+              const clean = line.replace('BOLD::', '');
+              const isImpression = clean.startsWith('IMPRESSION:');
 
               if (isImpression) {
-                let parts: string[] = [];
-                if (clean.includes('###')) {
-                  parts = clean.split('###').map(p => p.trim()).filter(Boolean);
-                } else {
-                  const title = clean.startsWith('CONCLUSION:') ? 'CONCLUSION:' : 'IMPRESSION:';
-                  const textAfter = clean.replace(/^(IMPRESSION|CONCLUSION):\s*(BOLD::)?\s*/i, '').trim();
-                  parts = textAfter ? [title, textAfter] : [title];
-                }
-                const headerTitle = parts[0] || 'IMPRESSION:';
-                const bulletPoints = parts.slice(1);
-
+                const parts = clean.split('###').map(p => p.trim()).filter(Boolean);
                 return (
                   <div key={idx} className="p-3 bg-amber-50 dark:bg-amber-950/40 border-l-4 border-amber-500 rounded-r-lg font-bold text-amber-950 dark:text-amber-200 mt-4 space-y-1">
-                    <div className="text-xs uppercase tracking-wider">{headerTitle}</div>
-                    {bulletPoints.length > 0 && (
-                      <ul className="list-disc list-inside space-y-0.5 text-xs font-normal">
-                        {bulletPoints.map((p, pIdx) => (
-                          <li key={pIdx} className="font-semibold">{p}</li>
-                        ))}
-                      </ul>
-                    )}
+                    <div className="text-xs uppercase tracking-wider">{parts[0]}</div>
+                    <ul className="list-disc list-inside space-y-0.5 text-xs font-normal">
+                      {parts.slice(1).map((p, pIdx) => (
+                        <li key={pIdx} className="font-semibold">{p}</li>
+                      ))}
+                    </ul>
                   </div>
                 );
               }
@@ -705,48 +851,7 @@ export const MergeTemplateProcessor: React.FC<MergeTemplateProcessorProps> = ({
               <p className="text-xs text-red-500 font-semibold">{modificationError}</p>
             )}
           </div>
-
-          {/* Bottom Navigation & Action Bar */}
-          <div className="pt-4 border-t border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-3 flex-wrap">
-            <button
-              type="button"
-              onClick={handleNewDictationAndMoveTop}
-              className="w-full sm:w-auto px-6 py-3 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-extrabold text-xs sm:text-sm shadow-lg hover:shadow-xl transition-all flex items-center justify-center gap-2"
-            >
-              <span>⬆ Move to Main Place & Start Next Dictation</span>
-            </button>
-            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-              <button
-                type="button"
-                onClick={handleScrollToMainPlace}
-                className="px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
-              >
-                <span>⬆ Move to Top</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleCopyAll}
-                className="px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-800 dark:text-white text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
-              >
-                <CopyIcon className="w-4 h-4" />
-                <span>{isCopied ? 'Copied!' : 'Copy'}</span>
-              </button>
-            </div>
-          </div>
         </div>
-      )}
-
-      {/* Floating Move to Main Place Button */}
-      {mergedFindings && (
-        <button
-          type="button"
-          onClick={handleScrollToMainPlace}
-          className="fixed bottom-6 right-6 z-40 p-3 px-4 rounded-full bg-blue-600 hover:bg-blue-700 text-white shadow-2xl border-2 border-white dark:border-slate-800 transition-all flex items-center gap-2 text-xs font-extrabold hover:scale-105"
-          title="Move to Main Place / Top"
-        >
-          <span className="text-base leading-none font-black">⬆</span>
-          <span className="tracking-wide">Main Place</span>
-        </button>
       )}
     </div>
   );
