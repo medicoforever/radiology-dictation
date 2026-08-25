@@ -252,6 +252,12 @@ export function generateDocxFromFindings(
             paragraphXmls.push(buildParagraphXml(buildRunXml(`•  ${cleanP}`, true, false, false)));
           }
         }
+      } else {
+        // Fallback: extract text after "IMPRESSION:" / "CONCLUSION:" directly
+        const textAfter = raw.replace(/^(IMPRESSION|CONCLUSION):\s*(BOLD::)?\s*/i, '').trim();
+        if (textAfter) {
+          paragraphXmls.push(buildParagraphXml(buildRunXml(`•  ${textAfter}`, true, false, false)));
+        }
       }
       continue;
     }
@@ -441,6 +447,10 @@ export async function mergeFindingsIntoDocx(
                   const cleanP = p.replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim();
                   if (cleanP) impressionItems.push(cleanP);
                 }
+              } else {
+                // Fallback: extract text after "IMPRESSION:" / "CONCLUSION:" directly
+                const textAfter = trimmed.replace(/^(IMPRESSION|CONCLUSION):\s*(BOLD::)?\s*/i, '').trim();
+                if (textAfter) impressionItems.push(textAfter);
               }
               continue;
             }
@@ -721,23 +731,12 @@ export async function extractTextFromDocxBlob(blob: Blob): Promise<string> {
   }
 }
 
-export async function extractLinesFromDocxBlob(blob: Blob): Promise<{ lines: string[]; docxBase64: string }> {
+export async function extractLinesFromDocxBlob(blob: Blob): Promise<string[]> {
   try {
     const arrayBuffer = await blob.arrayBuffer();
-
-    // Convert ArrayBuffer to base64
-    let binary = '';
-    const bytes = new Uint8Array(arrayBuffer);
-    const chunkSize = 8192;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-      binary += String.fromCharCode.apply(null, chunk as any);
-    }
-    const docxBase64 = btoa(binary);
-
     const entries = await parseZip(arrayBuffer);
     const docEntry = entries.get('word/document.xml');
-    if (!docEntry) return { lines: [], docxBase64 };
+    if (!docEntry) return [];
     const xmlStr = new TextDecoder('utf-8').decode(docEntry.data);
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlStr, 'application/xml');
@@ -751,9 +750,9 @@ export async function extractLinesFromDocxBlob(blob: Blob): Promise<{ lines: str
       }
       if (line.trim()) lines.push(line.trim());
     }
-    return { lines, docxBase64 };
+    return lines;
   } catch (e) {
     console.warn('extractLinesFromDocxBlob error:', e);
-    return { lines: [], docxBase64: '' };
+    return [];
   }
 }
