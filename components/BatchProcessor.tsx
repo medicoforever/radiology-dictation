@@ -2927,7 +2927,7 @@ const BatchProcessor: React.FC<BatchProcessorProps> = ({ onBack, selectedModel, 
                                                                 <span className="font-semibold text-red-700 dark:text-red-300">Recording...</span>
                                                             </div>
                                                             <button
-                                                                onClick={() => handleStopContinue(batch.id)}
+                                                                onClick={() => handleStopContinue()}
                                                                 className="bg-red-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition-colors"
                                                             >
                                                                 Finish Recording

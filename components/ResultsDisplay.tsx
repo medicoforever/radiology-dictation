@@ -921,8 +921,8 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
     setUndoState([...findings]);
     const updated = findings.filter((_, i) => i !== indexToDelete);
     onAllFindingsUpdate(updated);
-    if (editingState?.index === indexToDelete) {
-      setEditingState(null);
+    if (editingIndex === indexToDelete) {
+      setEditingIndex(null);
     }
   };
 
@@ -1307,6 +1307,7 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               )}
             </div>
           );
+        })}
         {(!findings || findings.length === 0) && !isLive && (
             <div className="text-center py-8 text-slate-500 dark:text-slate-400">
                 <p>No findings have been transcribed yet.</p>

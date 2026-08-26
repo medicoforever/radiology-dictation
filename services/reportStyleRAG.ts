@@ -4,6 +4,7 @@ const RAG_ENABLED_KEY = 'radiology_rag_style_matching_enabled';
 
 export interface StyleTemplate {
   name: string;
+  title?: string;
   category: string;
   exemplarText: string;
 }
@@ -101,7 +102,8 @@ export async function getRelevantStyleTemplates(hintText: string): Promise<Style
     return false;
   });
 
-  return matched.length > 0 ? matched : COMMON_REPORT_STYLES.slice(0, 1);
+  const list = matched.length > 0 ? matched : COMMON_REPORT_STYLES.slice(0, 1);
+  return list.map(s => ({ ...s, title: s.title || s.name }));
 }
 
 export function augmentPromptWithStyleTemplates(basePrompt: string, styleTemplates: StyleTemplate[]): string {

@@ -846,8 +846,7 @@ export async function applyAstMutationsToDocx(
         parent.insertBefore(newP, lastInserted.nextSibling);
         lastInserted = newP;
       }
-    }
-  } else {
+    } else {
       // If neither slot nor header exists, append IMPRESSION: header and bullets to w:body
       const body = xmlDoc.getElementsByTagName('w:body')[0];
       if (body) {
@@ -895,7 +894,7 @@ export async function applyAstMutationsToDocx(
         }
       }
     }
-
+  }
 
   // 3. Serialize modified DOM back into DOCX zip
   const serializer = new XMLSerializer();

@@ -73,14 +73,14 @@ const TemplateSelectionModal: React.FC<TemplateSelectionModalProps> = ({
       setCustomDocxSkillPrompt('');
     } else {
       if (selectedTemplateId) {
-        const found = RADIOLOGY_TEMPLATES_CATALOG.find(t => t.id === selectedTemplateId);
+        const found = allTemplatesList.find(t => t.id === selectedTemplateId);
         if (found) {
           setPreviewTemplate(found);
           return;
         }
       }
-      if (RADIOLOGY_TEMPLATES_CATALOG.length > 0) {
-        setPreviewTemplate(RADIOLOGY_TEMPLATES_CATALOG[0]);
+      if (allTemplatesList.length > 0) {
+        setPreviewTemplate(allTemplatesList[0]);
       }
     }
   }, [isOpen, selectedTemplateId]);

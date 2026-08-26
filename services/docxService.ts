@@ -821,12 +821,20 @@ export async function extractTextFromDocxBlob(blob: Blob): Promise<string> {
   }
 }
 
-export async function extractLinesFromDocxBlob(blob: Blob): Promise<string[]> {
+export async function extractLinesFromDocxBlob(blob: Blob): Promise<{ lines: string[]; docxBase64: string }> {
   try {
     const arrayBuffer = await blob.arrayBuffer();
+    let binary = '';
+    const bytes = new Uint8Array(arrayBuffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const docxBase64 = typeof btoa === 'function' ? btoa(binary) : '';
+
     const entries = await parseZip(arrayBuffer);
     const docEntry = entries.get('word/document.xml');
-    if (!docEntry) return [];
+    if (!docEntry) return { lines: [], docxBase64 };
     const xmlStr = new TextDecoder('utf-8').decode(docEntry.data);
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlStr, 'application/xml');
@@ -840,9 +848,9 @@ export async function extractLinesFromDocxBlob(blob: Blob): Promise<string[]> {
       }
       if (line.trim()) lines.push(line.trim());
     }
-    return lines;
+    return { lines, docxBase64 };
   } catch (e) {
     console.warn('extractLinesFromDocxBlob error:', e);
-    return [];
+    return { lines: [], docxBase64: '' };
   }
 }
