@@ -935,55 +935,7 @@ export async function applyAstMutationsToDocx(
         lastInserted = newP;
       }
     }
-  } else {
-      // If neither slot nor header exists, append IMPRESSION: header and bullets to w:body
-      const body = xmlDoc.getElementsByTagName('w:body')[0];
-      if (body) {
-        const sectPr = body.getElementsByTagName('w:sectPr')[0];
-        
-        const headP = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:p');
-        const headR = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:r');
-        const headRPr = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:rPr');
-        const headB = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:b');
-        const headU = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:u');
-        headU.setAttributeNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:val', 'single');
-        headRPr.appendChild(headB);
-        headRPr.appendChild(headU);
-        headR.appendChild(headRPr);
-        const headT = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:t');
-        headT.textContent = 'IMPRESSION:';
-        headR.appendChild(headT);
-        headP.appendChild(headR);
-
-        if (sectPr) {
-          body.insertBefore(headP, sectPr);
-        } else {
-          body.appendChild(headP);
-        }
-
-        let lastInserted: Element = headP;
-        for (let i = 0; i < impressionItems.length; i++) {
-          const cleanBullet = impressionItems[i].replace(/^[\s\u00a0\u200b\u2022\u2023\u2043\u2219\u25cf\u25cb\u25e6\u2013\u2014\-\u2022\*\d\.]+/gu, '').trim();
-          const p = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:p');
-          const r = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:r');
-          const t = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:t');
-          t.textContent = cleanBullet;
-          t.setAttribute('xml:space', 'preserve');
-          r.appendChild(t);
-          p.appendChild(r);
-
-          formatBulletParagraph(p, cleanBullet);
-
-          if (sectPr) {
-            body.insertBefore(p, sectPr);
-          } else {
-            body.appendChild(p);
-          }
-          lastInserted = p;
-        }
-      }
-    }
-
+  }
 
   // 3. Serialize modified DOM back into DOCX zip
   const serializer = new XMLSerializer();

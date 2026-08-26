@@ -364,7 +364,8 @@ export const processAudioWithDocx = async (
   batchName?: string,
   selectedTemplate?: { id?: string; name: string; category?: string; modality?: string; lines?: string[]; docxBase64?: string; skillPrompt?: string } | null,
   skillEnabled: boolean = true,
-  activeSkillPrompt?: string
+  activeSkillPrompt?: string,
+  consultantStyleEnabled: boolean = true
 ): Promise<{ findings: string[]; docxBlob?: Blob }> => {
   const isReprocessing = existingFindings && existingFindings.length > 0;
 
@@ -902,7 +903,8 @@ export const mergeFindingsWithAst = async (
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
   skillEnabled: boolean = true,
-  activeSkillPrompt?: string
+  activeSkillPrompt?: string,
+  consultantStyleEnabled: boolean = true
 ): Promise<{ findings: string[]; docxBlob?: Blob }> => {
   if (!selectedTemplate.docxBase64) {
     const findings = await mergeFindingsWithTemplate(findingsText, selectedTemplate, model, customPrompt, customImages, skillEnabled, activeSkillPrompt);
@@ -1284,7 +1286,9 @@ export const processTextFindings = async (
   model: string,
   customPrompt?: string,
   customImages?: Array<{ data: string; mimeType: string }> | null,
-  selectedTemplate?: { id: string; name: string; category?: string; modality?: string; lines: string[]; docxBase64?: string; skillPrompt?: string } | null
+  selectedTemplate?: { id?: string; name: string; category?: string; modality?: string; lines?: string[]; docxBase64?: string; skillPrompt?: string } | null,
+  skillEnabled: boolean = true,
+  consultantStyleEnabled: boolean = true
 ): Promise<{ findings: string[]; docxBlob?: Blob }> => {
   if (selectedTemplate) {
     if (selectedTemplate.docxBase64) {
@@ -1295,8 +1299,9 @@ export const processTextFindings = async (
           model,
           customPrompt,
           customImages,
-          true,
-          selectedTemplate.skillPrompt
+          skillEnabled,
+          selectedTemplate.skillPrompt,
+          consultantStyleEnabled
         );
         if (astRes && astRes.findings && astRes.findings.length > 0) {
           return astRes;
@@ -1305,7 +1310,7 @@ export const processTextFindings = async (
         console.warn('AST text merge error, falling back:', e);
       }
     }
-    const findings = await mergeFindingsWithTemplate(rawText, selectedTemplate, model, customPrompt, customImages);
+    const findings = await mergeFindingsWithTemplate(rawText, selectedTemplate as any, model, customPrompt, customImages, skillEnabled, selectedTemplate.skillPrompt);
     return { findings };
   }
 
@@ -1646,7 +1651,7 @@ export async function runComplexImpressionGeneration(currentFindings: string[], 
     const content = currentFindings.join('\n\n') + (additionalFindings ? `\n\n${additionalFindings}` : '');
     const targetModel = getValidModelName(selectedModel);
 
-    const { finalResult: expertNotesContent } = await runAgenticAnalysis(content, targetModel);
+    const { finalResult: expertNotesContent, enhancementText } = await runAgenticAnalysis(content, targetModel);
 
     const findingsWithoutImpression = currentFindings.filter(f => !f.toUpperCase().startsWith('IMPRESSION:'));
 
