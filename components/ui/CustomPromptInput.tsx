@@ -14,6 +14,13 @@ export interface StyleToggles {
   compactImpression: boolean;
 }
 
+export const DEFAULT_STYLE_TOGGLES: StyleToggles = {
+  telegraphic: true,
+  boldAbnormalities: true,
+  radsAutoCompute: true,
+  compactImpression: true,
+};
+
 export interface CustomPromptInputProps {
   prompt?: string;
   value?: string;
@@ -54,12 +61,7 @@ const CustomPromptInput: React.FC<CustomPromptInputProps> = ({
   onImagesChange,
   className = '',
   isLiveMode = false,
-  styleToggles = {
-    telegraphic: true,
-    boldAbnormalities: true,
-    radsAutoCompute: true,
-    compactImpression: true,
-  },
+  styleToggles = DEFAULT_STYLE_TOGGLES,
   onStyleTogglesChange,
 }) => {
   const activePrompt = (typeof prompt === 'string' ? prompt : (typeof value === 'string' ? value : ''));
@@ -74,11 +76,28 @@ const CustomPromptInput: React.FC<CustomPromptInputProps> = ({
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
 
   // Local style toggles state
-  const [localToggles, setLocalToggles] = useState<StyleToggles>(styleToggles);
+  const [localToggles, setLocalToggles] = useState<StyleToggles>(styleToggles || DEFAULT_STYLE_TOGGLES);
 
   useEffect(() => {
-    setLocalToggles(styleToggles);
-  }, [styleToggles]);
+    if (styleToggles) {
+      setLocalToggles(prev => {
+        if (
+          prev.telegraphic === styleToggles.telegraphic &&
+          prev.boldAbnormalities === styleToggles.boldAbnormalities &&
+          prev.radsAutoCompute === styleToggles.radsAutoCompute &&
+          prev.compactImpression === styleToggles.compactImpression
+        ) {
+          return prev;
+        }
+        return styleToggles;
+      });
+    }
+  }, [
+    styleToggles?.telegraphic,
+    styleToggles?.boldAbnormalities,
+    styleToggles?.radsAutoCompute,
+    styleToggles?.compactImpression,
+  ]);
 
   const handleToggleChange = (key: keyof StyleToggles) => {
     const updated = {
