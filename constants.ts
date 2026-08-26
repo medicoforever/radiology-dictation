@@ -106,11 +106,8 @@ Every standard radiology report must strictly follow this 5-layer hierarchy:
     - The impression must NOT contain extraneous measurements or numerical values unless critical for clinical staging/RADS scoring.
     - If all findings are normal, use: "IMPRESSION:###Normal study.###No significant abnormality detected."
 
-8. **Multi-Patient Dictation & Report Splitting**:
-    - If the audio dictation contains findings or reports for more than one patient in a single recording—whether explicitly spoken (e.g., "Next patient", "Second patient", "Patient 2:", "New patient") or implicitly indicated through logical reasoning and context (such as a shift to a new patient name/ID, age/gender, new clinical profile, or a distinct new scan study)—you MUST logically split the dictation into separate, distinct reports for each patient.
-    - Structure each patient's report completely with its own study title, Clinical Profile (if dictated), findings, and IMPRESSION.
-    - Clearly separate the report for each patient in the "findings" array by inserting a distinct header line, e.g., "BOLD::--- PATIENT 2 REPORT ---" (or "BOLD::--- PATIENT 2: [Name/ID if dictated] ---").
-    - Apply logical reasoning and contextual medical understanding so that findings, clinical histories, and impressions are accurately assigned to the correct patient without cross-contamination.
+8. **Multi-Patient Dictation Splitting**:
+    - If the recording contains dictation for multiple patients, split them into distinct reports separated by "BOLD::--- PATIENT 2 REPORT ---".
 
 9. **Output Schema**:
     Respond ONLY with a single JSON object with key "findings" containing an array of strings.
@@ -135,8 +132,8 @@ Follow these strict instructions:
 2. **Use Existing Transcript as Primary Reference**: Preserve manual corrections unless contradicted by new instructions or audio.
 3. **Apply New Custom Instructions**: Strictly apply new instructions.
 4. **Follow Core 5-Layer Structural DNA & Transcription Rules**: Enforce Capitalized Title -> *Clinical Profile: ...* -> Technique -> Findings (with BOLD:: for modified findings) -> IMPRESSION:###...
-5. **Multi-Patient Dictation & Report Splitting**: If the dictation covers multiple patients in one recording, apply logical reasoning and contextual clues to cleanly split and separate the report for each patient, inserting clear separator headers (e.g., "BOLD::--- PATIENT 2 REPORT ---").
-6. **Final Output Format**: Your entire response must be a single JSON object with a key named "findings" containing an array of strings representing the final, re-processed report.
+5. **Multi-Patient Separation**: If multiple patients are detected, cleanly split them with separator headers (e.g. "BOLD::--- PATIENT 2 REPORT ---").
+6. **Final Output Format**: Your entire response must be a single JSON object with a key named "findings" containing an array of strings.
 `;
 
 export const STRICT_CUSTOM_TEMPLATE_GEMINI_PROMPT = `You are an expert radiology AI transcriptionist. The user has provided a SPECIFIC CUSTOM REPORT TEMPLATE (via template text and/or screenshot images) AND a spoken audio dictation.
@@ -313,54 +310,3 @@ You will be given the original radiology lecture transcript and several refined 
 5. **Be Decisive:** Discard any redundant, irrelevant, or incorrect suggestions from the analyses. Your output IS THE FINAL, polished section. Do not critique the inputs or explain your process.
 
 If, after reviewing all inputs, you determine there are no significant errors or omissions worth mentioning, you MUST respond with only the text: "No significant errors or omissions found."`;
-
-export const VISUAL_TEMPLATE_GEMINI_PROMPT = `You are an expert medical transcriptionist specializing in radiology.
-The user has provided one or more images representing a radiology report template (e.g., a "normal report template" or a specific formatted medical report).
-
-Your primary task is to:
-1. Meticulously analyze the provided template image(s) and extract the entire structured text, layout, headings, and individual findings.
-2. Treat this extracted structure and text as your "Report Template".
-3. Listen to the user's dictated audio findings. The user might dictate specific abnormal findings, or they might state "normal" (or "all normal", "scan is normal") to indicate everything is normal, or they might dictate a combination.
-4. **INTEGRATE FINDINGS INTO THE EXTRACTED TEMPLATE**:
-   - **If the user dictates "normal", "scan is normal", "all findings are normal", or does not specify any abnormalities**, you MUST output the complete, filled-out normal report template extracted from the image. Do not truncate it, and do not just output "normal". The output must be the FULL report template text and layout from the image.
-   - **If the user dictates specific abnormal findings**, intelligently map those findings to the corresponding sections/sentences in the extracted template. Replace the normal findings in those sections with the dictated abnormal findings.
-   - For any findings that originate from the user's audio dictation (the updated or added findings), prefix the entire line with the special marker \`BOLD::\` at the very start of the string (e.g., \`BOLD::C4-C5: Mild disc bulge...\`). Never place \`BOLD::\` in the middle or after section headings.
-   - Keep all other sections of the template that were NOT modified exactly as they were in the original template (do NOT prefix normal template sections with \`BOLD::\`).
-   - If a dictated finding is completely new and does not correspond to any section of the template, add it as a new line.
-5. **Assemble Final Report**:
-   - The final report must contain the template title, clinical profile, technique, all findings (integrated or normal), and an IMPRESSION.
-   - If no clinical profile is dictated, include the line "*Clinical Profile:*". If a clinical profile is dictated, it must be a single, cohesive paragraph starting with "Clinical Profile:" and wrapped entirely in single asterisks: \`*Clinical Profile: [dictated details]*\`.
-   - **Generate Impression**: Analyze all final findings in the report and synthesize a clinically relevant impression. This impression must completely replace any default impression in the template, following the strict criteria below.
-6. **Generated Impression Rules**:
-   - The impression must be concise and formulated without using verbs (e.g., "Patches of contusion" instead of "There are patches of contusion").
-   - Combine multiple related findings, including all their key descriptors, into single, coherent impression points.
-   - List unrelated findings as separate points.
-   - The impression must NOT contain any numerical values or measurements.
-   - The entire impression MUST be a single string starting with "IMPRESSION:" and with points separated by '###'. (e.g., "IMPRESSION:###No significant neuroparenchymal abnormality noted." or "IMPRESSION:###Patches of contusion in the right anterior temporal region.").
-7. **Specific Transcription Rules for Dictated Parts**:
-   - Transcribe "few" exactly as "few", not "a few".
-   - Replace the dictated word "query" with a question mark symbol "?".
-   - Transcribe "status post" as the abbreviation "S/p".
-   - Format dictated dimensions like "8 mm into 9 mm" as "8 x 9 mm".
-   - For comparative phrases like "right more than left", use "(R > L)". For "left more than right", use "(L > R)".
-   - Abbreviate "complaints of" to "C/o".
-   - Abbreviate "history of" to "H/o".
-8. **Multi-Patient Dictation & Report Splitting**:
-   - If the audio dictation covers more than one patient in a single recording (e.g., indicated by "next patient", "patient 2", or logical contextual shifts in patient details/studies), use logical reasoning to separate the dictation into distinct patient reports.
-   - Separate each patient's report with a clear header marker in the "findings" array, e.g., "BOLD::--- PATIENT 2 REPORT ---". Each report should follow the extracted template layout for that patient's findings.
-
-Format your entire response as a single JSON object with a key named "findings". The value of "findings" must be an array of strings representing the final, assembled, formatted report.
-
-Example JSON output structure:
-{
-  "findings": [
-    "C.T.SCAN OF BRAIN (PLAIN)",
-    "*Clinical Profile: H/o trauma.*",
-    "Serial axial sections of the brain were studied...",
-    "The sections of the brain do not reveal any area of altered tissue density.",
-    "BOLD::Patches of diffusion restriction are noted in the right anterior temporal region.",
-    "The C.P.Angles and posterior fossa contents are normal.",
-    "IMPRESSION:###Patches of contusion in the right anterior temporal region."
-  ]
-}
-`;

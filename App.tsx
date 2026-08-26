@@ -1,68 +1,50 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import AudioRecorder from './components/AudioRecorder';
-import ResultsDisplay from './components/ResultsDisplay';
-import { AppStatus, IdentifiedError } from './types';
-import { processAudio, processAudioWithDocx, createChat, blobToBase64, base64ToBlob, createChatFromText, identifyPotentialErrors } from './services/geminiService';
-import Spinner from './components/ui/Spinner';
-import { Chat } from '@google/genai';
-import { saveAudioBlob, getAudioBlob, deleteAudioBlob } from './services/audioStorage';
+import React, { useState, useEffect } from 'react';
+import { AppStatus } from './types';
 import { BatchProcessor } from './components/BatchProcessor';
-import LiveDictation from './components/LiveDictation';
 import MergeTemplateProcessor from './components/MergeTemplateProcessor';
-import WaveformIcon from './components/icons/WaveformIcon';
 import SunIcon from './components/icons/SunIcon';
 import MoonIcon from './components/icons/MoonIcon';
-import DownloadIcon from './components/icons/DownloadIcon';
-import UploadIcon from './components/icons/UploadIcon';
-import CustomPromptInput from './components/ui/CustomPromptInput';
+import ApiKeyModal from './components/ApiKeyModal';
+import ApiKeyGuideTab from './components/ApiKeyGuideTab';
+import OnboardingOverlay, { wasOnboardingDismissed, setOnboardingDismissed } from './components/OnboardingOverlay';
+import { hasApiKey } from './services/apiKeyStore';
+import { generateRadnitoPDF } from './services/pdfGenerator';
+import { isRAGStyleMatchingEnabled, setRAGStyleMatchingEnabled } from './services/reportStyleRAG';
 import TemplateSelectorBanner from './components/ui/TemplateSelectorBanner';
 import TemplateSelectionModal, { SelectedTemplateData } from './components/ui/TemplateSelectionModal';
-import { mergeFindingsIntoDocx, downloadDocxBlob } from './services/docxService';
-import { getUserTemplates, UserTemplate, isTemplateSkillEnabled, isConsultantStyleEnabled, getTemplateCustomPrompt } from './services/templateStorage';
+import { getUserTemplates, UserTemplate } from './services/templateStorage';
 
-interface ChatMessage {
-  author: 'You' | 'AI';
-  text: string;
-}
-
-const SINGLE_MODE_STORAGE_KEY = 'radiologyDictationSingleMode';
 const ERROR_CHECK_ENABLED_KEY = 'radiologyErrorCheckEnabled';
-const TEMPLATE_STORAGE_KEY = 'radiologyDictationActiveTemplate';
-
-const getCleanMimeType = (blob: Blob): string => {
-    let mimeType = blob.type;
-    if (!mimeType) {
-        return 'audio/ogg';
-    }
-    if (mimeType.startsWith('audio/webm') || mimeType.startsWith('video/webm')) {
-        return 'audio/webm';
-    }
-    return mimeType.split(';')[0];
-};
 
 const App: React.FC = () => {
-  const [mode, setMode] = useState<'single' | 'batch' | 'live' | 'merge_template'>('single');
-  const [status, setStatus] = useState<AppStatus>(AppStatus.Idle);
-  const [findings, setFindings] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
-  const isCancelledRef = useRef<boolean>(false);
+  const [keySaved, setKeySaved] = useState<boolean>(() => hasApiKey());
+  // Auto-redirect to guide tab if no API key is set
+  const [mode, setMode] = useState<'batch' | 'merge_template' | 'guide'>(() => hasApiKey() ? 'batch' : 'guide');
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.5-flash');
+  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState<boolean>(false);
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(() => !hasApiKey() && !wasOnboardingDismissed());
+  // Show a blocking overlay when user tries to go to batch mode without API key
+  const [showKeyRequiredAlert, setShowKeyRequiredAlert] = useState<boolean>(false);
+  const [isRAGEnabled, setIsRAGEnabled] = useState<boolean>(() => isRAGStyleMatchingEnabled());
 
-  const [chat, setChat] = useState<Chat | null>(null);
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
-  const [isChatting, setIsChatting] = useState<boolean>(false);
-  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.1-pro-preview');
-  const [customPrompt, setCustomPrompt] = useState<string>('');
-  const [customImages, setCustomImages] = useState<Array<{ data: string; mimeType: string }>>([]);
-  const [identifiedErrors, setIdentifiedErrors] = useState<IdentifiedError[]>([]);
-  const [errorCheckStatus, setErrorCheckStatus] = useState<'idle' | 'checking' | 'complete'>('idle');
-
-  // Template state (optional: only if selected by user)
+  // Template State
   const [selectedTemplate, setSelectedTemplate] = useState<SelectedTemplateData | null>(null);
-  const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
   const [autoDownloadDocx, setAutoDownloadDocx] = useState<boolean>(true);
-  const [currentDocxBlob, setCurrentDocxBlob] = useState<Blob | null>(null);
-  const [userCustomTemplates, setUserCustomTemplates] = useState<UserTemplate[]>([]);
+  const [isTemplateModalOpen, setIsTemplateModalOpen] = useState<boolean>(false);
+  const [customTemplates, setCustomTemplates] = useState<UserTemplate[]>([]);
+
+  useEffect(() => {
+    getUserTemplates().then(tmpls => setCustomTemplates(tmpls)).catch(() => {});
+  }, []);
+
+  const refreshCustomTemplates = async () => {
+    try {
+      const tmpls = await getUserTemplates();
+      setCustomTemplates(tmpls);
+    } catch (e) {
+      console.warn('Failed to fetch user templates:', e);
+    }
+  };
 
   const [theme, setTheme] = useState(() => {
     const storedTheme = localStorage.getItem('theme');
@@ -71,6 +53,7 @@ const App: React.FC = () => {
     }
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   });
+
   const [isErrorCheckEnabled, setIsErrorCheckEnabled] = useState(() => {
     const saved = localStorage.getItem(ERROR_CHECK_ENABLED_KEY);
     return saved ? JSON.parse(saved) : false;
@@ -94,760 +77,281 @@ const App: React.FC = () => {
     setTheme(prevTheme => (prevTheme === 'light' ? 'dark' : 'light'));
   };
 
-  const loadUserCustomTemplates = async () => {
-    try {
-      const list = await getUserTemplates();
-      setUserCustomTemplates(list);
-    } catch (e) {
-      console.warn('Could not load custom user templates:', e);
-    }
-  };
-
-  useEffect(() => {
-    loadUserCustomTemplates();
-  }, []);
-
-  const [isRestored, setIsRestored] = useState(false);
-
-  // Load state from localStorage & IndexedDB on initial render
-  useEffect(() => {
-    const loadState = async () => {
-      try {
-        const savedTemplateJSON = localStorage.getItem(TEMPLATE_STORAGE_KEY);
-        if (savedTemplateJSON) {
-          try {
-            const savedTmpl = JSON.parse(savedTemplateJSON);
-            setSelectedTemplate(savedTmpl);
-          } catch (e) {}
-        }
-
-        const savedStateJSON = localStorage.getItem(SINGLE_MODE_STORAGE_KEY);
-        if (savedStateJSON) {
-          const savedState = JSON.parse(savedStateJSON);
-          if (savedState.findings && savedState.findings.length > 0) {
-            let blob: Blob | null = null;
-            blob = await getAudioBlob('single_mode_audio');
-
-            if (!blob && savedState.audio?.data) {
-              try {
-                blob = base64ToBlob(savedState.audio.data, savedState.audio.type);
-              } catch (e) {
-                console.warn("Could not decode legacy base64 audio:", e);
-              }
-            }
-
-            setAudioBlob(blob);
-            setFindings(savedState.findings);
-            setChatHistory(savedState.chatHistory || []);
-            setStatus(AppStatus.Success);
-            
-            setSelectedModel(savedState.selectedModel || 'gemini-3.1-pro-preview');
-            setCustomPrompt(savedState.customPrompt || '');
-            setCustomImages(savedState.customImages || []);
-
-            const chatPromise = blob 
-                ? createChat(blob, savedState.findings, savedState.customPrompt, savedState.customImages)
-                : createChatFromText(savedState.findings, savedState.customPrompt, savedState.customImages);
-
-            chatPromise
-              .then(setChat)
-              .catch(err => console.error("Failed to recreate chat session from saved state:", err));
-          }
-        }
-      } catch (err) {
-        console.error("Failed to load state from localStorage:", err);
-        localStorage.removeItem(SINGLE_MODE_STORAGE_KEY);
-      } finally {
-        setIsRestored(true);
-      }
-    };
-    loadState();
-  }, []);
-
-  // Save state to localStorage & IndexedDB whenever it changes
-  useEffect(() => {
-    if (!isRestored) return;
-
-    const saveState = async () => {
-      if (selectedTemplate) {
-        localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify(selectedTemplate));
-      } else {
-        localStorage.removeItem(TEMPLATE_STORAGE_KEY);
-      }
-
-      if (status === AppStatus.Success && findings.length > 0) {
-        try {
-          const stateToSave: any = {
-            findings,
-            chatHistory,
-            selectedModel,
-            customPrompt,
-            customImages,
-            hasAudio: !!audioBlob,
-          };
-          localStorage.setItem(SINGLE_MODE_STORAGE_KEY, JSON.stringify(stateToSave));
-
-          if (audioBlob) {
-            await saveAudioBlob('single_mode_audio', audioBlob);
-          } else {
-            await deleteAudioBlob('single_mode_audio');
-          }
-        } catch (err) {
-          console.error("Failed to save state:", err);
-        }
-      } else if (status === AppStatus.Idle && findings.length === 0) {
-        localStorage.removeItem(SINGLE_MODE_STORAGE_KEY);
-        deleteAudioBlob('single_mode_audio').catch(() => {});
-      }
-    };
-    saveState();
-  }, [status, findings, audioBlob, chatHistory, selectedModel, customPrompt, customImages, selectedTemplate, isRestored]);
-
-  // Background error check
-  useEffect(() => {
-    const checkForErrors = async () => {
-        if (isErrorCheckEnabled && status === AppStatus.Success && findings.length > 0) {
-            setErrorCheckStatus('checking');
-            setIdentifiedErrors([]);
-            try {
-                const errors = await identifyPotentialErrors(findings, selectedModel);
-                setIdentifiedErrors(errors);
-            } catch (err) {
-                console.error("Failed to check for errors:", err);
-            } finally {
-                setErrorCheckStatus('complete');
-            }
-        } else {
-            setIdentifiedErrors([]);
-            setErrorCheckStatus('idle');
-        }
-    };
-
-    checkForErrors();
-  }, [findings, status, selectedModel, isErrorCheckEnabled]);
-
-  const handleCancelProcessing = useCallback(() => {
-    isCancelledRef.current = true;
-    setStatus(AppStatus.Idle);
-    setError(null);
-  }, []);
-
-  const handleRecordingComplete = useCallback(async (audioBlob: Blob) => {
-    if (!audioBlob || audioBlob.size === 0) {
-      setError('Recording or upload failed. The audio file is empty.');
-      setStatus(AppStatus.Error);
+  const handleBatchTabClick = () => {
+    if (!hasApiKey()) {
+      setShowKeyRequiredAlert(true);
       return;
     }
-    isCancelledRef.current = false;
-    setStatus(AppStatus.Processing);
-    setError(null);
-    setFindings([]);
-    setAudioBlob(audioBlob);
-
-    try {
-      const isSkillActive = isTemplateSkillEnabled();
-      const isConsultantActive = isConsultantStyleEnabled();
-      const customSkill = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
-      const { findings: processedText, docxBlob: generatedDocxBlob } = await processAudioWithDocx(
-        audioBlob,
-        selectedModel,
-        customPrompt,
-        customImages,
-        undefined,
-        undefined,
-        selectedTemplate,
-        isSkillActive,
-        isSkillActive ? (customSkill || selectedTemplate.skillPrompt) : undefined,
-        isConsultantActive
-      );
-      if (isCancelledRef.current) return;
-      setFindings(processedText);
-
-      let docxToUse = generatedDocxBlob || null;
-      if (!docxToUse && selectedTemplate && processedText.length > 0) {
-        try {
-          docxToUse = await mergeFindingsIntoDocx(selectedTemplate.docxBase64, processedText, selectedTemplate.name || processedText[0] || 'Radiology_Report');
-        } catch (e) {}
-      }
-      setCurrentDocxBlob(docxToUse);
-
-      // DOCX merge & auto-download if template is selected
-      if (selectedTemplate && autoDownloadDocx && processedText.length > 0 && docxToUse) {
-        try {
-          const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
-          const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-          if (!isCancelledRef.current) {
-            downloadDocxBlob(docxToUse, cleanFileName);
-          }
-        } catch (docErr) {
-          console.warn('Auto DOCX download error:', docErr);
-        }
-      }
-
-      if (isCancelledRef.current) return;
-      const chatSession = await createChat(audioBlob, processedText, customPrompt, customImages);
-      if (isCancelledRef.current) return;
-      setChat(chatSession);
-      const aiGreeting = "I have reviewed the audio and the transcript. How can I help you further?";
-      setChatHistory([{ author: 'AI', text: `${processedText.join('\n\n')}\n\n${aiGreeting}` }]);
-      
-      setStatus(AppStatus.Success);
-    } catch (err) {
-      if (isCancelledRef.current) return;
-      console.error(err);
-      setError(err instanceof Error ? err.message : 'An unknown error occurred during processing.');
-      setStatus(AppStatus.Error);
-    }
-  }, [selectedModel, customPrompt, customImages, selectedTemplate, autoDownloadDocx]);
-
-  
-  const handleLiveDictationComplete = useCallback(async (transcript: string, audioBlob: Blob | null) => {
-    setStatus(AppStatus.Processing);
-    setError(null);
-    setFindings([]);
-    setAudioBlob(audioBlob);
-
-    try {
-        const processedText = transcript.split('\n').filter(line => line.trim() !== '');
-        setFindings(processedText);
-        setCurrentDocxBlob(null);
-
-        // DOCX merge & auto-download if template is selected
-        if (selectedTemplate && autoDownloadDocx && processedText.length > 0) {
-          try {
-            const docxBase64 = selectedTemplate.docxBase64;
-            const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
-            const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-            const blob = await mergeFindingsIntoDocx(docxBase64, processedText, title);
-            downloadDocxBlob(blob, cleanFileName);
-          } catch (docErr) {
-            console.warn('Auto DOCX download error:', docErr);
-          }
-        }
-        
-        const chatSession = await createChatFromText(processedText, customPrompt, customImages);
-        setChat(chatSession);
-
-        const aiGreeting = "I have reviewed the live transcript. How can I help you further?";
-        setChatHistory([{ author: 'AI', text: `${processedText.join('\n\n')}\n\n${aiGreeting}` }]);
-
-        setMode('single');
-        setStatus(AppStatus.Success);
-
-    } catch (err) {
-        console.error(err);
-        setError(err instanceof Error ? err.message : 'An unknown error occurred during live processing.');
-        setStatus(AppStatus.Error);
-        setMode('single');
-    }
-  }, [customPrompt, customImages, selectedTemplate, autoDownloadDocx]);
-
-  const handleReprocess = useCallback(async () => {
-    if (!audioBlob) {
-      setError('No audio available to reprocess.');
-      setStatus(AppStatus.Error);
-      return;
-    }
-
-    setStatus(AppStatus.Processing);
-    setError(null);
-    
-    try {
-      const isSkillActive = isTemplateSkillEnabled();
-      const isConsultantActive = isConsultantStyleEnabled();
-      const customSkill = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
-      const { findings: processedText, docxBlob: generatedDocxBlob } = await processAudioWithDocx(
-        audioBlob,
-        selectedModel,
-        customPrompt,
-        customImages,
-        findings,
-        undefined,
-        selectedTemplate,
-        isSkillActive,
-        isSkillActive ? (customSkill || selectedTemplate.skillPrompt) : undefined,
-        isConsultantActive
-      );
-      setFindings(processedText);
-
-      let docxToUse = generatedDocxBlob || null;
-      if (!docxToUse && selectedTemplate && processedText.length > 0) {
-        try {
-          docxToUse = await mergeFindingsIntoDocx(selectedTemplate.docxBase64, processedText, selectedTemplate.name || processedText[0] || 'Radiology_Report');
-        } catch (e) {}
-      }
-      setCurrentDocxBlob(docxToUse);
-
-      // DOCX merge & auto-download ONLY if template is selected
-      if (selectedTemplate && autoDownloadDocx && processedText.length > 0 && docxToUse) {
-        try {
-          const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
-          const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-          downloadDocxBlob(docxToUse, cleanFileName);
-        } catch (docErr) {
-          console.warn('Auto DOCX download error:', docErr);
-        }
-      }
-
-      const chatSession = await createChat(audioBlob, processedText, customPrompt, customImages);
-      setChat(chatSession);
-      const aiGreeting = "I have re-processed the audio with your new instructions. How can I help you further?";
-      setChatHistory([{ author: 'AI', text: `${processedText.join('\n\n')}\n\n${aiGreeting}` }]);
-      
-      setStatus(AppStatus.Success);
-    } catch (err) {
-      console.error(err);
-      setError(err instanceof Error ? err.message : 'An unknown error occurred during re-processing.');
-      setStatus(AppStatus.Error);
-    }
-  }, [audioBlob, selectedModel, customPrompt, customImages, findings, selectedTemplate, autoDownloadDocx]);
-
-  const handleUpdateFinding = (index: number, newText: string) => {
-    setCurrentDocxBlob(null);
-    setFindings(prevFindings => {
-      const updatedFindings = [...prevFindings];
-      if (updatedFindings[index] !== undefined) {
-        updatedFindings[index] = newText;
-      }
-      return updatedFindings;
-    });
+    setMode('batch');
   };
 
-  const handleSendMessage = useCallback(async (message: string | Blob) => {
-    if (!chat) return;
-
-    setIsChatting(true);
-    let userMessageText = '';
-
-    if (typeof message === 'string') {
-        userMessageText = message;
-    } else {
-        userMessageText = 'Dictated instruction sent.';
-    }
-
-    setChatHistory(prevHistory => [...prevHistory, { author: 'You', text: userMessageText }]);
-
-    try {
-        let messageParam: any;
-
-        if (typeof message === 'string') {
-            messageParam = message;
-        } else {
-            const base64Audio = await blobToBase64(message);
-            messageParam = [
-                {
-                    inlineData: {
-                        mimeType: getCleanMimeType(message),
-                        data: base64Audio,
-                    },
-                },
-                {
-                    text: 'Please listen to the audio and answer the question or follow the instructions.',
-                },
-            ];
-        }
-
-        const response = await chat.sendMessage(messageParam);
-        const modelResponse = response.text;
-        setChatHistory(prevHistory => [...prevHistory, { author: 'AI', text: modelResponse }]);
-    } catch (err) {
-        console.error("Chat error:", err);
-        const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
-        setChatHistory(prevHistory => [
-            ...prevHistory,
-            { author: 'AI', text: `Sorry, I encountered an error: ${errorMessage}` },
-        ]);
-    } finally {
-        setIsChatting(false);
-    }
-  }, [chat]);
-
-  const resetSingleMode = () => {
-    setStatus(AppStatus.Idle);
-    setFindings([]);
-    setCurrentDocxBlob(null);
-    setError(null);
-    setAudioBlob(null);
-    setChat(null);
-    setChatHistory([]);
-    setIsChatting(false);
-    setIdentifiedErrors([]);
-    setErrorCheckStatus('idle');
+  const handleOnboardingComplete = () => {
+    setKeySaved(true);
+    setShowOnboarding(false);
+    setMode('batch');
   };
 
-  const handleContinueDictation = async (newAudioBlob: Blob) => {
-    setStatus(AppStatus.Processing);
-    try {
-        const isSkillActive = isTemplateSkillEnabled();
-        const isConsultantActive = isConsultantStyleEnabled();
-        const customSkill = selectedTemplate?.id ? getTemplateCustomPrompt(selectedTemplate.id) : undefined;
-        const { findings: processedText, docxBlob: generatedDocxBlob } = await processAudioWithDocx(
-          newAudioBlob,
-          selectedModel,
-          customPrompt,
-          customImages,
-          findings,
-          undefined,
-          selectedTemplate,
-          isSkillActive,
-          isSkillActive ? (customSkill || selectedTemplate.skillPrompt) : undefined,
-          isConsultantActive
-        );
-        setFindings(processedText);
-        setCurrentDocxBlob(generatedDocxBlob || null);
-
-        if (selectedTemplate && autoDownloadDocx && processedText.length > 0) {
-          try {
-            const docxBase64 = selectedTemplate.docxBase64;
-            if (docxBase64) {
-              const title = selectedTemplate.name || processedText[0] || 'Radiology_Report';
-              const cleanFileName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.docx`;
-              const blob = generatedDocxBlob || await mergeFindingsIntoDocx(docxBase64, processedText, title);
-              downloadDocxBlob(blob, cleanFileName);
-            }
-          } catch (docErr) {
-            console.warn('Auto DOCX download error:', docErr);
-          }
-        }
-
-        const chatSession = await createChatFromText(processedText, customPrompt, customImages);
-        setChat(chatSession);
-        const aiGreeting = "I've appended your new dictation. How can I help you further?";
-        setChatHistory([{ author: 'AI', text: `${processedText.join('\n\n')}\n\n${aiGreeting}` }]);
-        
-        setStatus(AppStatus.Success);
-    } catch (err) {
-        console.error("Failed to continue dictation with full reprocessing:", err);
-        setError(err instanceof Error ? err.message : 'Failed to append dictation.');
-        setStatus(AppStatus.Error);
-    }
+  const handleOnboardingSkip = () => {
+    setShowOnboarding(false);
+    setMode('guide');
   };
 
-  const handleDownload = () => {
-    if (audioBlob) {
-      try {
-        const url = URL.createObjectURL(audioBlob);
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = url;
-        const mimeType = audioBlob.type;
-        const extension = mimeType === 'audio/mpeg' ? 'mp3' : (mimeType.split('/')[1] || 'webm').split(';')[0];
-        a.download = `radiology_recording.${extension}`;
-        document.body.appendChild(a);
-        a.click();
-        window.URL.revokeObjectURL(url);
-        a.remove();
-      } catch (err) {
-        console.error('Failed to download audio:', err);
-      }
-    }
-  };
-
-  const renderSingleModeContent = () => {
-    switch (status) {
-      case AppStatus.Idle:
-      case AppStatus.Recording:
-        return (
-          <>
-            <div className="flex justify-end items-center gap-3 mb-4 -mt-4 flex-wrap">
-                 <button 
-                    onClick={() => setMode('merge_template')} 
-                    className="flex items-center gap-1.5 text-xs sm:text-sm font-bold text-teal-600 hover:text-teal-800 dark:text-teal-400 dark:hover:text-teal-300 transition-colors bg-teal-50 dark:bg-teal-950/40 px-3 py-1.5 rounded-xl border border-teal-200 dark:border-teal-850"
-                >
-                    📑 Merge Findings to Template
-                </button>
-                 <button 
-                    onClick={() => setMode('live')} 
-                    className="flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-green-600 hover:text-green-800 dark:text-green-400 dark:hover:text-green-300 transition-colors"
-                >
-                    <WaveformIcon className="w-4 h-4" />
-                    Live Dictation
-                </button>
-                 <button 
-                    onClick={() => setMode('batch')} 
-                    className="text-xs sm:text-sm font-semibold text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 transition-colors"
-                >
-                    Batch Processing &rarr;
-                </button>
-            </div>
-
-            {/* Template Selector Banner at Top */}
-            <TemplateSelectorBanner
-              selectedTemplate={selectedTemplate}
-              onOpenModal={() => setIsTemplateModalOpen(true)}
-              onClearTemplate={() => setSelectedTemplate(null)}
-              autoDownloadDocx={autoDownloadDocx}
-              onToggleAutoDownload={setAutoDownloadDocx}
-              onSelectTemplate={setSelectedTemplate}
-              className="mb-4"
-            />
-
-             <CustomPromptInput
-                prompt={customPrompt}
-                onPromptChange={setCustomPrompt}
-                                className="mb-6"
-            />
-            <AudioRecorder
-              status={status}
-              setStatus={setStatus}
-              onRecordingComplete={handleRecordingComplete}
-            />
-          </>
-        );
-      case AppStatus.Processing:
-        return (
-          <div className="text-center p-8 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 max-w-xl mx-auto my-6">
-            <Spinner className="w-12 h-12 mx-auto text-blue-600 mb-2" />
-            <p className="text-slate-700 dark:text-slate-200 mt-4 text-xl font-semibold">
-              {selectedTemplate ? `Integrating findings into ${selectedTemplate.name}...` : 'Analyzing and correcting text...'}
-            </p>
-            <p className="text-slate-500 dark:text-slate-400 mt-2 text-sm">
-              {selectedTemplate && autoDownloadDocx ? 'Your formatted Word DOCX report will be downloaded automatically.' : 'This may take a moment.'}
-            </p>
-            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-              <button
-                onClick={handleCancelProcessing}
-                className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2.5 px-6 rounded-xl shadow transition-colors focus:outline-none focus:ring-2 focus:ring-red-400"
-                aria-label="Cancel processing"
-              >
-                Cancel
-              </button>
-              {audioBlob && (
-                <button
-                  onClick={handleDownload}
-                  className="bg-slate-500 text-white font-semibold py-2.5 px-6 rounded-xl hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-400 transition-colors"
-                >
-                  Download File
-                </button>
-              )}
-            </div>
-          </div>
-        );
-
-      case AppStatus.Success:
-        return (
-          <ResultsDisplay 
-            findings={findings} 
-            onReset={resetSingleMode} 
-            audioBlob={audioBlob}
-            chatHistory={chatHistory}
-            isChatting={isChatting}
-            onSendMessage={handleSendMessage}
-            onSwitchToBatch={() => setMode('batch')}
-            selectedModel={selectedModel}
-            onModelChange={setSelectedModel}
-            onReprocess={handleReprocess}
-            onUpdateFinding={handleUpdateFinding}
-            onAllFindingsUpdate={(newFindings) => {
-              setCurrentDocxBlob(null);
-              setFindings(newFindings);
-            }}
-            onContinueDictation={handleContinueDictation}
-            customPrompt={customPrompt}
-            onCustomPromptChange={setCustomPrompt}
-            customImages={customImages}
-            onCustomImagesChange={setCustomImages}
-            identifiedErrors={identifiedErrors}
-            errorCheckStatus={errorCheckStatus}
-            selectedTemplate={selectedTemplate}
-            onSelectTemplate={setSelectedTemplate}
-            docxBlob={currentDocxBlob}
-            onDocxBlobChange={setCurrentDocxBlob}
-          />
-        );
-      case AppStatus.Error:
-        return (
-          <div className="max-w-2xl mx-auto text-center p-8 bg-red-50/80 dark:bg-red-950/30 border border-red-200 dark:border-red-800/60 rounded-2xl shadow-sm space-y-5">
-            <h3 className="text-2xl font-bold text-red-700 dark:text-red-300">An Error Occurred</h3>
-            <p className="text-sm text-red-600 dark:text-red-300 bg-white/80 dark:bg-slate-900/60 p-4 rounded-xl border border-red-200 dark:border-red-900/60 font-mono text-xs text-left max-w-xl mx-auto">
-              {error || 'An unexpected error occurred during audio processing.'}
-            </p>
-            <p className="text-slate-600 dark:text-slate-300 text-sm">
-              {audioBlob ? 'Your recorded audio is preserved. You can download it, change the model to retry, or upload a different audio file.' : 'Please try recording or uploading an audio file again.'}
-            </p>
-
-            <div className="bg-white dark:bg-slate-800 p-5 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm max-w-xl mx-auto space-y-4">
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 text-sm">
-                <label htmlFor="single-error-model-select" className="font-bold text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                  Select Model to Retry:
-                </label>
-                <select 
-                  id="single-error-model-select"
-                  value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.target.value)}
-                  className="bg-slate-50 border border-slate-300 text-slate-900 text-sm font-semibold rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 w-full sm:w-auto dark:bg-slate-700 dark:border-slate-600 dark:text-white"
-                >
-                  <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Default)</option>
-                  <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-                  <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
-                  <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
-                  <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
-                  <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                  <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite</option>
-                </select>
-              </div>
-
-              <div className="flex flex-wrap justify-center items-center gap-3 pt-3 border-t dark:border-slate-700">
-                {audioBlob && (
-                  <button
-                    onClick={handleDownload}
-                    className="bg-slate-700 hover:bg-slate-800 text-white font-bold py-2.5 px-5 rounded-xl shadow transition-colors flex items-center gap-2 text-sm"
-                    title="Download audio recording safely to your device"
-                  >
-                    <DownloadIcon className="w-4 h-4" />
-                    Download Audio File
-                  </button>
-                )}
-
-                <label className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-5 rounded-xl shadow transition-colors flex items-center gap-2 text-sm cursor-pointer">
-                  <UploadIcon className="w-4 h-4" />
-                  <span>Upload & Process Audio</span>
-                  <input
-                    type="file"
-                    accept="audio/*,.mp3,.wav,.ogg,.m4a,.webm"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        handleRecordingComplete(file);
-                        e.target.value = '';
-                      }
-                    }}
-                    className="hidden"
-                  />
-                </label>
-
-                {audioBlob && (
-                  <button
-                    onClick={() => handleRecordingComplete(audioBlob)}
-                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-5 rounded-xl shadow transition-colors text-sm"
-                  >
-                    Retry Current Audio
-                  </button>
-                )}
-
-                <button
-                  onClick={resetSingleMode}
-                  className="bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200 font-bold py-2.5 px-5 rounded-xl hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors text-sm"
-                >
-                  Start Fresh
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      default:
-        return null;
-    }
-  };
-
-  const renderContent = () => {
-    switch (mode) {
-      case 'single':
-        return renderSingleModeContent();
-      case 'merge_template':
-        return (
-          <MergeTemplateProcessor
-            selectedModel={selectedModel}
-            initialTemplate={selectedTemplate}
-            onSelectTemplate={(tmpl) => setSelectedTemplate(tmpl)}
-            onBack={() => setMode('single')}
-          />
-        );
-      case 'batch':
-        return <BatchProcessor 
-                    selectedModel={selectedModel} 
-                    isErrorCheckEnabled={isErrorCheckEnabled}
-                    selectedTemplate={selectedTemplate}
-                    onBack={() => {
-                        resetSingleMode();
-                        setMode('single');
-                    }} 
-                />;
-      case 'live':
-        return <LiveDictation 
-                  onComplete={handleLiveDictationComplete} 
-                  onBack={() => setMode('single')} 
-                  selectedTemplate={selectedTemplate}
-               />;
-      default:
-        return renderSingleModeContent();
-    }
+  const getPageDescription = () => {
+    if (mode === 'guide') return 'Step-by-step tutorial to get free Gemini API Keys and load-balance quotas.';
+    return 'Transcribe and process multiple radiology audio dictations concurrently in bulk with 600+ standard templates and DOCX merge.';
   };
 
   return (
-    <div className="min-h-screen bg-slate-100 dark:bg-slate-900 text-slate-900 dark:text-slate-100 flex flex-col font-sans">
-      {/* Template Selection Modal */}
-      <TemplateSelectionModal
-        isOpen={isTemplateModalOpen}
-        onClose={() => setIsTemplateModalOpen(false)}
-        onSelectTemplate={tmpl => {
-          setSelectedTemplate(tmpl);
-          setAutoDownloadDocx(true);
-        }}
-        selectedTemplateId={selectedTemplate?.id}
-        customTemplates={userCustomTemplates}
-        onRefreshCustomTemplates={loadUserCustomTemplates}
-      />
+    <div className="min-h-screen bg-gray-50 dark:bg-slate-900 flex flex-col items-center justify-center p-4 font-sans transition-colors duration-300">
+      {/* Onboarding overlay for first-time users */}
+      {showOnboarding && (
+        <OnboardingOverlay
+          onComplete={handleOnboardingComplete}
+          onSkipToGuide={handleOnboardingSkip}
+        />
+      )}
 
-      <header className="bg-white dark:bg-slate-800 shadow-sm p-4 border-b border-slate-200 dark:border-slate-700/50 sticky top-0 z-20">
-        <div className="max-w-6xl mx-auto flex justify-between items-center">
-          <div className="flex items-center gap-3">
-            <h1 
-              onClick={() => {
-                if (status === AppStatus.Success) {
-                  resetSingleMode();
-                }
-                setMode('single');
-              }}
-              className="text-xl sm:text-2xl font-black bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-blue-400 dark:to-indigo-400 bg-clip-text text-transparent cursor-pointer select-none"
+      {/* Key Required Alert Modal */}
+      {showKeyRequiredAlert && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fade-in">
+          <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 border border-slate-200 dark:border-slate-700 text-center space-y-4">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-amber-100 dark:bg-amber-900/50 text-3xl mx-auto">
+              🔑
+            </div>
+            <h3 className="text-xl font-extrabold text-slate-800 dark:text-white">
+              API Key Required First!
+            </h3>
+            <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
+              Before you can start dictating, you need to set up a <strong>free Gemini API key</strong>. 
+              It only takes 1 minute and no payment is required!
+            </p>
+            <div className="bg-blue-50 dark:bg-slate-900/80 p-3 rounded-xl border border-blue-200 dark:border-blue-800 text-xs text-left text-slate-600 dark:text-slate-400">
+              <p className="font-bold text-blue-700 dark:text-blue-300 mb-1">💡 What is an API key?</p>
+              <p>It's a free password from Google that lets RADNITO use AI to process your audio dictations. Your key stays private in your browser only.</p>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2 justify-center pt-2">
+              <button
+                onClick={() => { setShowKeyRequiredAlert(false); setMode('guide'); }}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-6 py-2.5 rounded-xl text-sm shadow-lg transition-all"
+              >
+                🔑 Get Free API Key (1 min)
+              </button>
+              <button
+                onClick={() => setShowKeyRequiredAlert(false)}
+                className="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 font-semibold px-4 py-2.5 rounded-xl text-sm transition-all"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="w-full max-w-4xl mx-auto">
+        <header className="text-center mb-6 relative">
+          <div className="flex items-center justify-between mb-4">
+            <button
+              onClick={() => setIsApiKeyModalOpen(true)}
+              className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm flex items-center space-x-1.5 ${
+                keySaved
+                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 hover:bg-emerald-200'
+                  : 'bg-rose-100 text-rose-800 dark:bg-rose-950/70 dark:text-rose-300 border border-rose-300 dark:border-rose-800 hover:bg-rose-200 animate-pulse'
+              }`}
             >
-              Radiology Dictation Corrector
-            </h1>
-            <span className="hidden sm:inline text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-300">
-              v23.0 • DOCX Formats
-            </span>
+              <span>{keySaved ? '🟢 Gemini API Key Active' : '🔴 Set Gemini API Key'}</span>
+            </button>
+
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={generateRadnitoPDF}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3.5 py-1.5 rounded-xl shadow text-xs flex items-center space-x-1 transition-all"
+                title="Download complete RADNITO PDF guide"
+              >
+                <span>📄 PDF Guide</span>
+              </button>
+
+              <button
+                onClick={toggleTheme}
+                className="p-2 rounded-full text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                aria-label="Toggle theme"
+              >
+                {theme === 'light' ? <MoonIcon className="w-5 h-5" /> : <SunIcon className="w-5 h-5" />}
+              </button>
+            </div>
           </div>
 
-          <div className="flex items-center gap-3">
-             {/* Model Select */}
-             <div className="flex items-center gap-2">
-                <label htmlFor="global-model-select" className="text-xs font-semibold text-slate-500 dark:text-slate-400 hidden sm:inline">Model:</label>
-                <select
-                  id="global-model-select"
+          <h1 className="text-4xl sm:text-5xl font-black tracking-tight text-blue-700 dark:text-blue-400 drop-shadow-sm">
+            RADNITO
+          </h1>
+          <p className="text-slate-600 dark:text-slate-400 mt-2 text-sm sm:text-base font-medium">
+            {getPageDescription()}
+          </p>
+
+          {/* Navigation Tabs */}
+          <div className="flex flex-wrap justify-center gap-2 mt-4 p-1.5 bg-slate-200/60 dark:bg-slate-800 rounded-xl">
+            <button
+              onClick={handleBatchTabClick}
+              className={`px-5 py-2 text-xs sm:text-sm font-bold rounded-lg transition-all relative ${
+                mode === 'batch'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              📂 Batch Dictation Workspace
+              {!keySaved && mode !== 'batch' && (
+                <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-amber-500 rounded-full text-white text-[8px] flex items-center justify-center font-bold" title="API Key required">🔒</span>
+              )}
+            </button>
+            <button
+              onClick={() => {
+                if (!hasApiKey()) {
+                  setShowKeyRequiredAlert(true);
+                  return;
+                }
+                setMode('merge_template');
+              }}
+              className={`px-5 py-2 text-xs sm:text-sm font-bold rounded-lg transition-all relative ${
+                mode === 'merge_template'
+                  ? 'bg-teal-600 text-white shadow-md'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              📑 Merge Findings to Template
+              {!keySaved && mode !== 'merge_template' && (
+                <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-amber-500 rounded-full text-white text-[8px] flex items-center justify-center font-bold" title="API Key required">🔒</span>
+              )}
+            </button>
+            <button
+              onClick={() => setMode('guide')}
+              className={`px-5 py-2 text-xs sm:text-sm font-bold rounded-lg transition-all ${
+                mode === 'guide'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : !keySaved
+                    ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-700 animate-pulse hover:bg-amber-200'
+                    : 'bg-blue-50 text-blue-600 dark:bg-blue-950/40 dark:text-blue-400 hover:bg-blue-100'
+              }`}
+            >
+              {!keySaved ? '🔑 Setup API Key (Start Here!)' : '🔑 Free API Key Guide'}
+            </button>
+          </div>
+
+          {!keySaved && mode === 'guide' && (
+            <div className="mt-3 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/50 dark:to-orange-950/50 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300 text-xs p-4 rounded-xl flex items-start space-x-3">
+              <span className="text-2xl flex-shrink-0 mt-0.5">👇</span>
+              <div className="space-y-1">
+                <p className="font-bold text-sm">Follow the guide below to get your free API key</p>
+                <p className="text-amber-700 dark:text-amber-400">Once you paste and save your key, the Dictation Workspace will unlock automatically!</p>
+              </div>
+            </div>
+          )}
+
+          {!keySaved && mode !== 'guide' && (
+            <div className="mt-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300 text-xs p-3 rounded-xl flex items-center justify-between">
+              <span>⚠️ No Gemini API Key configured. Please add your free key to begin dictating.</span>
+              <button
+                onClick={() => setMode('guide')}
+                className="ml-2 bg-amber-600 hover:bg-amber-700 text-white font-bold px-3 py-1 rounded-lg text-xs shadow"
+              >
+                Get Key Guide
+              </button>
+            </div>
+          )}
+
+          <div className="mt-4 flex flex-wrap justify-center items-center gap-x-6 gap-y-2">
+            {mode === 'batch' && (
+              <div className="flex items-center gap-2">
+                <label htmlFor="model-select" className="text-xs sm:text-sm font-bold text-slate-700 dark:text-slate-300">
+                  AI Model:
+                </label>
+                <select 
+                  id="model-select"
                   value={selectedModel}
                   onChange={(e) => setSelectedModel(e.target.value)}
-                  className="bg-slate-100 dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-800 dark:text-slate-100 text-xs font-bold rounded-lg p-1.5 focus:ring-2 focus:ring-blue-500"
+                  className="bg-white border border-slate-300 text-slate-900 text-xs sm:text-sm font-medium rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 dark:bg-slate-700 dark:border-slate-600 dark:placeholder-slate-400 dark:text-white shadow-sm"
                 >
-                  <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Default)</option>
-                  <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                  <option value="gemini-3.5-flash">Gemini 3.5 Flash (Default)</option>
                   <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                   <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
                   <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
                   <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                   <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite</option>
                 </select>
-             </div>
-
-             {/* Dark mode toggle */}
-             <button
-                onClick={toggleTheme}
-                className="p-2 rounded-xl bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
-                title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-                aria-label="Toggle theme"
-             >
-                {theme === 'dark' ? <SunIcon className="w-4 h-4 text-amber-400" /> : <MoonIcon className="w-4 h-4 text-slate-600" />}
-             </button>
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <label htmlFor="error-check-toggle" className="text-xs sm:text-sm font-bold text-slate-700 dark:text-slate-300">
+                Automatic Error Finding
+              </label>
+              <button
+                onClick={() => setIsErrorCheckEnabled(!isErrorCheckEnabled)}
+                className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-slate-900 ${
+                  isErrorCheckEnabled ? 'bg-blue-600' : 'bg-gray-200 dark:bg-slate-600'
+                }`}
+                role="switch"
+                aria-checked={isErrorCheckEnabled}
+                id="error-check-toggle"
+              >
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                    isErrorCheckEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
-      <main className="max-w-5xl mx-auto w-full p-4 sm:p-6 flex-1 flex flex-col justify-start">
-        {renderContent()}
-      </main>
+        {mode === 'batch' && (
+          <TemplateSelectorBanner
+            selectedTemplate={selectedTemplate}
+            onOpenModal={() => setIsTemplateModalOpen(true)}
+            onClearTemplate={() => setSelectedTemplate(null)}
+            autoDownloadDocx={autoDownloadDocx}
+            onToggleAutoDownloadDocx={() => setAutoDownloadDocx(prev => !prev)}
+          />
+        )}
 
-      <footer className="text-center p-3 text-xs text-slate-400 dark:text-slate-500 border-t border-slate-200 dark:border-slate-800">
-        AI-Powered Radiology Transcription & Native DOCX Formats Integration
-      </footer>
+        <main className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl p-4 sm:p-8 min-h-[350px]">
+          {mode === 'batch' ? (
+            <BatchProcessor 
+              selectedModel={selectedModel} 
+              isErrorCheckEnabled={isErrorCheckEnabled}
+              selectedTemplate={selectedTemplate}
+              autoDownloadDocx={autoDownloadDocx}
+              onBack={() => setMode('guide')} 
+            />
+          ) : mode === 'merge_template' ? (
+            <MergeTemplateProcessor
+              selectedModel={selectedModel}
+              initialTemplate={selectedTemplate}
+              onSelectTemplate={(tmpl) => setSelectedTemplate(tmpl)}
+              onBack={() => setMode('batch')}
+            />
+          ) : (
+            <ApiKeyGuideTab onKeySaved={() => { setKeySaved(true); setMode('batch'); }} />
+          )}
+        </main>
+
+        <footer className="text-center mt-8 text-xs text-slate-500 dark:text-slate-500 space-y-1">
+          <p className="font-bold text-slate-700 dark:text-slate-300">RADNITO • Batch Radiology Dictation</p>
+          <p>Powered by Gemini AI • 24/7 Free Uptime</p>
+        </footer>
+
+        <ApiKeyModal
+          isOpen={isApiKeyModalOpen}
+          onClose={() => setIsApiKeyModalOpen(false)}
+          onKeyChange={() => setKeySaved(hasApiKey())}
+        />
+
+        <TemplateSelectionModal
+          isOpen={isTemplateModalOpen}
+          onClose={() => setIsTemplateModalOpen(false)}
+          onSelectTemplate={(tmpl) => setSelectedTemplate(tmpl)}
+          selectedTemplateId={selectedTemplate?.id}
+          customTemplates={customTemplates}
+          onRefreshCustomTemplates={refreshCustomTemplates}
+        />
+      </div>
     </div>
   );
 };

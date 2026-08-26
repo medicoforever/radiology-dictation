@@ -4,18 +4,15 @@ import WaveformIcon from './icons/WaveformIcon';
 import ResultsDisplay from './ResultsDisplay';
 import CustomPromptInput from './ui/CustomPromptInput';
 import { GEMINI_FLASH_LITE_MODEL } from '../constants';
-import { SelectedTemplateData } from './ui/TemplateSelectionModal';
 
 interface LiveDictationProps {
     onComplete: (transcript: string, audioBlob: Blob | null) => void;
     onBack: () => void;
-    selectedTemplate?: SelectedTemplateData | null;
 }
 
-const LiveDictation: React.FC<LiveDictationProps> = ({ onComplete, onBack, selectedTemplate = null }) => {
+const LiveDictation: React.FC<LiveDictationProps> = ({ onComplete, onBack }) => {
     const [findings, setFindings] = useState<string[]>([]);
     const [customPrompt, setCustomPrompt] = useState('');
-    const [liveModel, setLiveModel] = useState<'gemini-3.5-flash-lite' | 'gemini-3.1-flash-lite'>('gemini-3.5-flash-lite');
 
     const {
         status,
@@ -25,18 +22,11 @@ const LiveDictation: React.FC<LiveDictationProps> = ({ onComplete, onBack, selec
         stopSession,
         pauseSession,
         resumeSession,
-        syncFindings,
     } = useLiveSession();
 
     const handleStart = useCallback(() => {
-        // If a template is selected, prepend template guidance to customPrompt
-        let fullPrompt = customPrompt;
-        if (selectedTemplate) {
-            const templateGuide = `Active Template: ${selectedTemplate.name} (${selectedTemplate.category || selectedTemplate.modality}). Normal findings structure: ${selectedTemplate.lines.slice(0, 5).join('; ')}...`;
-            fullPrompt = fullPrompt ? `${templateGuide}\n${fullPrompt}` : templateGuide;
-        }
-        startSession(setFindings, fullPrompt, liveModel);
-    }, [startSession, customPrompt, selectedTemplate, liveModel]);
+        startSession(setFindings, customPrompt);
+    }, [startSession, customPrompt]);
 
     const handleStop = useCallback(() => {
         const { transcript, audioBlob } = stopSession();
@@ -49,12 +39,6 @@ const LiveDictation: React.FC<LiveDictationProps> = ({ onComplete, onBack, selec
             newFindings[index] = newText;
         }
         setFindings(newFindings);
-        syncFindings(newFindings);
-    };
-
-    const handleAllFindingsUpdate = (newFindings: string[]) => {
-        setFindings(newFindings);
-        syncFindings(newFindings);
     };
 
     if (!isSessionActive) {
@@ -69,54 +53,30 @@ const LiveDictation: React.FC<LiveDictationProps> = ({ onComplete, onBack, selec
                     Live Dictation
                 </h2>
                 <p className="text-slate-500 dark:text-slate-400 mb-6 text-center max-w-lg text-sm sm:text-base">
-                    Dictate radiology findings live. Spoken audio is transcribed continuously into clean, structured report lines.
+                    Dictate radiology findings live. Spoken audio is processed continuously into clean, structured report lines.
                 </p>
 
-                {/* Model Selector Card */}
-                <div className="w-full max-w-md bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/40 p-4 rounded-xl mb-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                {/* Exclusive Model Badge */}
+                <div className="w-full max-w-md bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/40 p-3.5 rounded-xl mb-6 shadow-sm flex items-center justify-between">
                     <div>
-                        <span className="text-xs font-semibold uppercase tracking-wider text-emerald-800 dark:text-emerald-300 block mb-1">
-                            Live AI Model
+                        <span className="text-xs font-semibold uppercase tracking-wider text-emerald-800 dark:text-emerald-300 block">
+                            Active Model
                         </span>
-                        <div className="flex items-center gap-2">
-                            <select
-                                value={liveModel}
-                                onChange={(e) => setLiveModel(e.target.value as any)}
-                                className="bg-white border border-emerald-300 dark:border-emerald-700 text-slate-800 dark:text-slate-100 text-xs font-bold rounded-lg p-2 focus:ring-2 focus:ring-emerald-500 dark:bg-slate-800"
-                            >
-                                <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (Default - Fast)</option>
-                                <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite</option>
-                            </select>
-                        </div>
+                        <span className="text-sm font-bold text-slate-800 dark:text-slate-100">
+                            Gemini 3.5 Flash-Lite
+                        </span>
                     </div>
-                    <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-800/50 dark:text-emerald-200 self-start sm:self-auto">
-                        ⚡ Real-Time Streaming
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-800/50 dark:text-emerald-200">
+                        ⚡ Ultra Low-Latency
                     </span>
                 </div>
 
-                {/* Selected Template Indicator if active */}
-                {selectedTemplate && (
-                    <div className="w-full max-w-md bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800/50 p-3 rounded-xl mb-4 text-xs text-blue-900 dark:text-blue-200 flex items-center justify-between">
-                        <div>
-                            <span className="font-bold block text-blue-950 dark:text-blue-100">
-                                📄 Active Template: {selectedTemplate.name}
-                            </span>
-                            <span className="text-blue-700 dark:text-blue-300 text-[11px]">
-                                Findings will merge into this template upon completion.
-                            </span>
-                        </div>
-                        <span className="px-2 py-0.5 rounded bg-blue-200 dark:bg-blue-900 text-blue-800 dark:text-blue-200 font-bold text-[10px]">
-                            {selectedTemplate.modality}
-                        </span>
-                    </div>
-                )}
-
                 {/* Voice Commands Guide */}
-                <div className="w-full max-w-md bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 p-4 rounded-xl mb-6 text-xs text-slate-700 dark:text-slate-300 space-y-1.5">
-                    <p className="font-semibold text-sm mb-1 text-slate-900 dark:text-slate-100">💡 Natural Voice Commands:</p>
+                <div className="w-full max-w-md bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 p-4 rounded-xl mb-6 text-xs text-blue-900 dark:text-blue-200 space-y-1.5">
+                    <p className="font-semibold text-sm mb-1 text-blue-950 dark:text-blue-100">💡 Natural Language Voice Commands:</p>
                     <ul className="list-disc list-inside space-y-1">
-                        <li>Say <strong>"move to next line"</strong> or <strong>"next line"</strong> for a new line.</li>
-                        <li>Say <strong>"new finding"</strong> or <strong>"next finding"</strong> to start a separate bold finding.</li>
+                        <li>Say <strong>"move to next line"</strong> or <strong>"next line"</strong> to create a line break.</li>
+                        <li>Say <strong>"new finding"</strong> or <strong>"next finding"</strong> to start a new formatted finding on a new line.</li>
                         <li>Say <strong>"full stop"</strong> for periods, <strong>"comma"</strong> for commas, <strong>"colon"</strong> for colons.</li>
                         <li>Say <strong>"impression section"</strong> to start an IMPRESSION block.</li>
                     </ul>
@@ -161,7 +121,7 @@ const LiveDictation: React.FC<LiveDictationProps> = ({ onComplete, onBack, selec
             liveError={error}
             findings={findings}
             onUpdateFinding={handleUpdateFinding}
-            onAllFindingsUpdate={handleAllFindingsUpdate}
+            onAllFindingsUpdate={setFindings}
             onPauseLive={pauseSession}
             onResumeLive={resumeSession}
             customPrompt={customPrompt}
@@ -172,7 +132,7 @@ const LiveDictation: React.FC<LiveDictationProps> = ({ onComplete, onBack, selec
             isChatting={false}
             onSendMessage={() => {}}
             onSwitchToBatch={() => {}}
-            selectedModel={liveModel}
+            selectedModel={GEMINI_FLASH_LITE_MODEL}
             onModelChange={() => {}}
             onReprocess={() => {}}
             onContinueDictation={async () => {}}
@@ -180,7 +140,6 @@ const LiveDictation: React.FC<LiveDictationProps> = ({ onComplete, onBack, selec
             onCustomImagesChange={() => {}}
             identifiedErrors={[]}
             errorCheckStatus={'idle'}
-            selectedTemplate={selectedTemplate}
         />
     );
 };
